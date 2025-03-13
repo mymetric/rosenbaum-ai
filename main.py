@@ -3,6 +3,13 @@ from bigquery import load_messages
 import pandas as pd
 import httpx
 import json
+from prompts import (
+    SYSTEM_PROMPTS,
+    GENERAL_ANALYSIS_PROMPT,
+    SUGGESTION_PROMPT,
+    DOCUMENTS_CHECKLIST_PROMPT,
+    CASE_ANALYSIS_PROMPT
+)
 
 def generate_grok_response(messages, prompt):
     # Sort messages in ascending order (oldest first)
@@ -24,13 +31,10 @@ def generate_grok_response(messages, prompt):
     conversation_text = "\n".join(conversation)
     
     # Prepare the prompt
-    full_prompt = f"""Analise a seguinte conversa e responda à pergunta do usuário:
-
-{conversation_text}
-
-Pergunta do usuário: {prompt}
-
-Resposta:"""
+    full_prompt = GENERAL_ANALYSIS_PROMPT.format(
+        conversation_text=conversation_text,
+        prompt=prompt
+    )
     
     # Call Grok API
     url = "https://api.x.ai/v1/chat/completions"
@@ -42,7 +46,7 @@ Resposta:"""
     data = {
         "model": "grok-2-latest",
         "messages": [
-            {"role": "system", "content": "Você é um assistente especializado em analisar conversas de atendimento ao cliente de um escritório de advocacia especializado em Direito do Consumidor, com foco em Direito Aéreo e Planos de Saúde. Suas respostas devem ser profissionais, claras e objetivas, sempre considerando o contexto jurídico específico dessas áreas."},
+            {"role": "system", "content": SYSTEM_PROMPTS["general"]},
             {"role": "user", "content": full_prompt}
         ],
         "temperature": 0,
@@ -96,13 +100,10 @@ def generate_suggestion(messages):
     conversation_text = "\n".join(conversation)
     
     # Prepare the prompt for suggestion
-    full_prompt = f"""Analise a seguinte conversa e sugira uma resposta profissional e adequada para a última mensagem do cliente:
-
-{conversation_text}
-
-Última mensagem do cliente: {last_client_message['message_text']}
-
-Sugestão de resposta:"""
+    full_prompt = SUGGESTION_PROMPT.format(
+        conversation_text=conversation_text,
+        last_client_message=last_client_message['message_text']
+    )
     
     # Call Grok API
     url = "https://api.x.ai/v1/chat/completions"
@@ -114,7 +115,7 @@ Sugestão de resposta:"""
     data = {
         "model": "grok-2-latest",
         "messages": [
-            {"role": "system", "content": "Você é um assistente especializado em atendimento ao cliente de um escritório de advocacia especializado em Direito do Consumidor, com foco em Direito Aéreo e Planos de Saúde. Suas respostas devem ser profissionais, claras e objetivas, sempre considerando o contexto jurídico específico dessas áreas."},
+            {"role": "system", "content": SYSTEM_PROMPTS["suggestion"]},
             {"role": "user", "content": full_prompt}
         ],
         "temperature": 0.7,
@@ -135,6 +136,18 @@ def generate_missing_documents(messages):
     # Sort messages in ascending order (oldest first)
     messages = messages.sort_values('created_at', ascending=True)
     
+    # Prepare document links dictionary
+    document_links = {}
+    for _, msg in messages.iterrows():
+        if msg['file_url'] and msg['attachment_filename']:
+            # Add file to document links with timestamp
+            timestamp = msg['created_at'].strftime('%d/%m/%Y %H:%M')
+            document_links[msg['attachment_filename']] = {
+                'url': msg['file_url'],
+                'timestamp': timestamp,
+                'ocr': msg['ocr_scan'] if msg['ocr_scan'] else None
+            }
+    
     # Prepare the conversation text
     conversation = []
     for _, msg in messages.iterrows():
@@ -150,18 +163,10 @@ def generate_missing_documents(messages):
     
     conversation_text = "\n".join(conversation)
     
-    # Prepare the prompt for missing documents
-    full_prompt = f"""Analise a seguinte conversa e liste os documentos essenciais que ainda precisam ser solicitados ao cliente para dar entrada no processo judicial. Considere:
-
-1. Documentos básicos de identificação
-2. Documentos específicos do caso (bilhetes aéreos, contratos de plano de saúde, etc.)
-3. Documentos comprobatórios de danos
-4. Documentos de comunicação com a empresa
-
-Conversa:
-{conversation_text}
-
-Lista de documentos faltantes para dar entrada no processo:"""
+    # Prepare the prompt for document checklist
+    full_prompt = DOCUMENTS_CHECKLIST_PROMPT.format(
+        conversation_text=conversation_text
+    )
     
     # Call Grok API
     url = "https://api.x.ai/v1/chat/completions"
@@ -173,7 +178,69 @@ Lista de documentos faltantes para dar entrada no processo:"""
     data = {
         "model": "grok-2-latest",
         "messages": [
-            {"role": "system", "content": "Você é um assistente especializado em análise de documentos para processos de Direito do Consumidor, com foco em Direito Aéreo e Planos de Saúde. Liste apenas os documentos essenciais que ainda não foram mencionados na conversa e que são necessários para dar entrada no processo judicial, considerando as especificidades dessas áreas do direito."},
+            {"role": "system", "content": SYSTEM_PROMPTS["documents"]},
+            {"role": "user", "content": full_prompt}
+        ],
+        "temperature": 0.7,
+        "stream": False
+    }
+    
+    try:
+        with httpx.Client(verify=True, timeout=30.0) as client:
+            response = client.post(url, headers=headers, json=data)
+            response.raise_for_status()
+            result = response.json()
+            checklist = result['choices'][0]['message']['content']
+            
+            # Add links to the checklist for documents that were found
+            for filename, info in document_links.items():
+                if filename in checklist:
+                    link_text = f"([Ver documento]({info['url']}) - {info['timestamp']}"
+                    if info['ocr']:
+                        link_text += f" - OCR: {info['ocr']}"
+                    link_text += ")"
+                    checklist = checklist.replace(filename, f"{filename} {link_text}")
+            
+            return checklist
+    except Exception as e:
+        st.error(f"Erro ao gerar checklist de documentos: {str(e)}")
+        return None
+
+def generate_case_analysis(messages):
+    # Sort messages in ascending order (oldest first)
+    messages = messages.sort_values('created_at', ascending=True)
+    
+    # Prepare the conversation text
+    conversation = []
+    for _, msg in messages.iterrows():
+        role = "Cliente" if msg['message_direction'] == 'received' else "Atendente"
+        content = msg['message_text'] or ''
+        if msg['ocr_scan']:
+            content += f"\nOCR: {msg['ocr_scan']}"
+        if msg['file_url']:
+            content += f"\n📎 [Anexo: {msg['attachment_filename'] or 'Arquivo'}]({msg['file_url']})"
+        if msg['audio_transcription']:
+            content += f"\n🎤 Transcrição: {msg['audio_transcription']}"
+        conversation.append(f"{role}: {content}")
+    
+    conversation_text = "\n".join(conversation)
+    
+    # Prepare the prompt for case analysis
+    full_prompt = CASE_ANALYSIS_PROMPT.format(
+        conversation_text=conversation_text
+    )
+    
+    # Call Grok API
+    url = "https://api.x.ai/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {st.secrets.grok.api_key}",
+        "Content-Type": "application/json"
+    }
+    
+    data = {
+        "model": "grok-2-latest",
+        "messages": [
+            {"role": "system", "content": SYSTEM_PROMPTS["case_analysis"]},
             {"role": "user", "content": full_prompt}
         ],
         "temperature": 0.7,
@@ -187,11 +254,60 @@ Lista de documentos faltantes para dar entrada no processo:"""
             result = response.json()
             return result['choices'][0]['message']['content']
     except Exception as e:
-        st.error(f"Erro ao gerar lista de documentos: {str(e)}")
+        st.error(f"Erro ao gerar análise do caso: {str(e)}")
         return None
 
+def calculate_response_time(messages):
+    """Calcula o tempo de resposta para cada mensagem recebida."""
+    response_times = {}
+    
+    # Ordenar mensagens por data
+    sorted_msgs = messages.sort_values('created_at')
+    
+    last_received_time = None
+    last_received_id = None
+    
+    for _, msg in sorted_msgs.iterrows():
+        if msg['message_direction'] == 'received':
+            last_received_time = msg['created_at']
+            last_received_id = msg['message_uid']
+        elif msg['message_direction'] == 'sent' and last_received_time is not None:
+            # Calcular tempo de resposta
+            response_time = (msg['created_at'] - last_received_time).total_seconds()
+            response_times[last_received_id] = response_time
+            last_received_time = None
+            last_received_id = None
+    
+    return response_times
+
+def format_response_time(seconds):
+    """Formata o tempo de resposta em uma string legível."""
+    if seconds < 60:
+        return f"{int(seconds)} segundos"
+    elif seconds < 3600:
+        minutes = int(seconds / 60)
+        return f"{minutes} minutos"
+    elif seconds < 86400:
+        hours = int(seconds / 3600)
+        return f"{hours} horas"
+    else:
+        days = int(seconds / 86400)
+        return f"{days} dias"
+
+def calculate_average_response_time(df):
+    """Calcula a média dos tempos de resposta para todas as mensagens."""
+    # Calcular tempos de resposta
+    response_times = calculate_response_time(df)
+    
+    if not response_times:
+        return None
+    
+    # Calcular média
+    avg_time = sum(response_times.values()) / len(response_times)
+    return avg_time
+
 st.set_page_config(
-    page_title="Rosenbaum AI",
+    page_title="Rosenbaum Advogados AI",
     layout="wide"
 )
 
@@ -243,51 +359,213 @@ grouped_df = grouped_df.rename(columns={
 # Sort by latest message timestamp
 grouped_df = grouped_df.sort_values('Última mensagem', ascending=False)
 
-# Navigation buttons
-col1, col2 = st.columns(2)
-with col1:
+# Hide sidebar in inbox page
+if st.session_state.current_page == "inbox":
+    st.markdown("""
+        <style>
+        [data-testid="stSidebar"] {
+            display: none;
+        }
+        </style>
+        """, unsafe_allow_html=True)
+
+# Add inbox button to sidebar
+with st.sidebar:
     if st.button("📥 Caixa de Entrada", use_container_width=True):
         st.session_state.current_page = "inbox"
-        st.rerun()
-with col2:
-    if st.button("💬 Chat", use_container_width=True):
-        st.session_state.current_page = "chat"
         st.rerun()
 
 # Page content
 if st.session_state.current_page == "inbox":
-    st.subheader("Dados agrupados por remetente")
+    st.title("📥 Rosenbaum Advogados AI")
+    
+    # Add metrics dashboard
+    st.markdown("""
+        <style>
+        .metrics-container {
+            display: flex;
+            gap: 1rem;
+            margin-bottom: 1.5rem;
+        }
+        .metric-card {
+            background: white;
+            border-radius: 0.8rem;
+            padding: 1.2rem;
+            flex: 1;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+            border: 1px solid #e0e0e0;
+            text-align: center;
+        }
+        .metric-card.today {
+            background: linear-gradient(135deg, #f0f9ff 0%, #ffffff 100%);
+            border: 1px solid #90cdf4;
+        }
+        .metric-title {
+            font-size: 0.9em;
+            color: #666;
+            margin-bottom: 0.5rem;
+        }
+        .metric-value {
+            font-size: 1.8em;
+            font-weight: bold;
+            color: #2c3e50;
+            margin-bottom: 0.3rem;
+        }
+        .metric-subtitle {
+            font-size: 0.8em;
+            color: #666;
+        }
+        .section-divider {
+            margin: 2.5rem 0;
+            text-align: left;
+            position: relative;
+            padding: 0;
+        }
+        .section-divider h2 {
+            font-size: 1.2em;
+            color: #2c3e50;
+            margin-bottom: 1rem;
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+        .section-divider::after {
+            content: "";
+            display: block;
+            height: 2px;
+            background: linear-gradient(90deg, #e0e0e0 0%, transparent 100%);
+            margin-top: 0.5rem;
+        }
+        </style>
+    """, unsafe_allow_html=True)
+    
+    # Calculate metrics
+    total_conversations = len(grouped_df)
+    total_messages = grouped_df['Total de mensagens recebidas'].sum()
+    total_files = grouped_df['Mensagens com arquivos'].sum()
+    total_images = grouped_df['Mensagens com OCR'].sum()
+    total_audios = len(df[df['audio_transcription'].notna()])
+    
+    # Get today's date for comparison
+    today = pd.Timestamp.now(tz='America/Sao_Paulo').date()
+    
+    # Calculate today's metrics
+    today_df = df[df['created_at'].dt.date == today]
+    messages_today = len(today_df[today_df['message_direction'] == 'received'])
+    files_today = len(today_df[today_df['file_url'].notna()])
+    images_today = len(today_df[today_df['ocr_scan'].notna()])
+    audios_today = len(today_df[today_df['audio_transcription'].notna()])
+    
+    # Calculate conversations from today
+    conversations_today = len(grouped_df[grouped_df['Última mensagem'].dt.date == today])
+    
+    # Calculate average response time for all messages
+    avg_response_time = calculate_average_response_time(df)
+    avg_response_time_str = f"{int(avg_response_time)} segundos" if avg_response_time is not None else "Sem dados"
+    
+    # Calculate average response time for today's messages
+    avg_response_time_today = calculate_average_response_time(today_df)
+    avg_response_time_today_str = f"{int(avg_response_time_today)} segundos" if avg_response_time_today is not None else "Sem dados"
+    
+    st.markdown(f"""
+        <div class="metrics-container">
+            <div class="metric-card">
+                <div class="metric-title">Total de Conversas</div>
+                <div class="metric-value">{total_conversations}</div>
+                <div class="metric-subtitle">💬 {conversations_today} hoje</div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-title">Total de Mensagens</div>
+                <div class="metric-value">{total_messages}</div>
+                <div class="metric-subtitle">📝 {messages_today} hoje</div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-title">Arquivos Enviados</div>
+                <div class="metric-value">{total_files}</div>
+                <div class="metric-subtitle">📎 {files_today} hoje</div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-title">Imagens Processadas</div>
+                <div class="metric-value">{total_images}</div>
+                <div class="metric-subtitle">📸 {images_today} hoje</div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-title">Áudios Processados</div>
+                <div class="metric-value">{total_audios}</div>
+                <div class="metric-subtitle">🎤 {audios_today} hoje</div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-title">Tempo Médio de Resposta</div>
+                <div class="metric-value">{int(avg_response_time) if avg_response_time is not None else '⏱️'}</div>
+                <div class="metric-subtitle">⏱️ {int(avg_response_time_today) if avg_response_time_today is not None else 0} segundos hoje</div>
+            </div>
+        </div>
+    """, unsafe_allow_html=True)
     
     # Create a container for filters with a light background
     with st.container():
+        st.markdown('<div class="section-divider"><h2>🔍 Filtros e Pesquisa</h2></div>', unsafe_allow_html=True)
         st.markdown("""
             <style>
             .filter-container {
                 background-color: #f0f2f6;
+                padding: 1.5rem;
+                border-radius: 0.8rem;
+                margin-bottom: 1.5rem;
+                box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+            }
+            .conversation-card {
+                background: white;
+                border-radius: 0.8rem;
                 padding: 1rem;
-                border-radius: 0.5rem;
                 margin-bottom: 1rem;
+                box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+                border: 1px solid #e0e0e0;
+                transition: all 0.3s ease;
+            }
+            .conversation-card:hover {
+                transform: translateY(-2px);
+                box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+            }
+            .conversation-header {
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                margin-bottom: 0.5rem;
+            }
+            .conversation-name {
+                font-size: 1.1em;
+                font-weight: bold;
+                color: #2c3e50;
+            }
+            .conversation-stats {
+                display: flex;
+                gap: 1rem;
+                color: #666;
+                font-size: 0.9em;
+            }
+            .conversation-time {
+                color: #666;
+                font-size: 0.85em;
             }
             </style>
             """, unsafe_allow_html=True)
         
         st.markdown('<div class="filter-container">', unsafe_allow_html=True)
         
-        # Add filter title
-        st.markdown("### 🔍 Filtros")
-        
         # Add search boxes in columns
         col1, col2 = st.columns(2)
         with col1:
-            search_phone = st.text_input("📱 Buscar por telefone:", placeholder="Digite o número de telefone...")
+            search_phone = st.text_input("📱 Buscar por telefone:", placeholder="Digite o número...")
         with col2:
             search_name = st.text_input("👤 Buscar por nome:", placeholder="Digite o nome...")
         
-        # Add date filter
+        # Add date filter with better formatting
         min_date = grouped_df['Última mensagem'].min().date()
         max_date = grouped_df['Última mensagem'].max().date()
         date_range = st.date_input(
-            "📅 Filtrar por data da última mensagem:",
+            "📅 Período:",
             value=(min_date, max_date),
             min_value=min_date,
             max_value=max_date
@@ -311,44 +589,53 @@ if st.session_state.current_page == "inbox":
             (filtered_df['Última mensagem'].dt.date <= end_date)
         ]
     
-    # Reset display count when filters change
-    if search_phone or search_name or len(date_range) == 2:
-        st.session_state.display_count = 20
-    
-    # Show number of results
-    st.markdown(f"**📊 Resultados encontrados: {len(filtered_df)}**")
+    # Show number of results with better formatting
+    st.markdown(f"""
+        <div style='
+            background-color: #e8f4f9;
+            padding: 1rem;
+            border-radius: 0.5rem;
+            margin-bottom: 1rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        '>
+            <span style='font-size: 1.2em;'>📊</span>
+            <span style='font-weight: bold;'>{len(filtered_df)} conversas encontradas</span>
+        </div>
+    """, unsafe_allow_html=True)
     
     # Create a container for the conversation list
-    with st.container():
-        # Create a more compact table layout
-        for _, row in filtered_df.head(st.session_state.display_count).iterrows():
-            with st.container():
-                # Create columns for the conversation row
-                col1, col2, col3, col4 = st.columns([2, 2, 1, 0.5])
-                
-                with col1:
-                    st.markdown(f"**{row['Nome']}** • 📱 {row['Telefone']}")
-                
-                with col2:
-                    st.markdown(f"💬 {row['Total de mensagens recebidas']} • 📸 {row['Mensagens com OCR']} • 📎 {row['Mensagens com arquivos']}")
-                
-                with col3:
-                    st.markdown(f"⏰ {row['Última mensagem'].strftime('%d/%m/%Y %H:%M')}")
-                
-                with col4:
-                    if st.button("💬", key=f"btn_{row['Nome']}_{row['Telefone']}", use_container_width=True):
-                        st.session_state.selected_sender = f"{row['Nome']} ({row['Telefone']})"
-                        st.session_state.current_page = "chat"
-                        st.rerun()
-                
-                # Add a separator between conversations
-                st.markdown("---")
+    for _, row in filtered_df.head(st.session_state.display_count).iterrows():
+        st.markdown(f"""
+            <div class='conversation-card'>
+                <div class='conversation-header'>
+                    <div class='conversation-name'>
+                        {row['Nome']} • 📱 {row['Telefone']}
+                    </div>
+                    <div class='conversation-time'>
+                        ⏰ {row['Última mensagem'].strftime('%d/%m/%Y %H:%M')}
+                    </div>
+                </div>
+                <div class='conversation-stats'>
+                    <span>💬 {row['Total de mensagens recebidas']} mensagens</span>
+                    <span>📸 {row['Mensagens com OCR']} imagens</span>
+                    <span>📎 {row['Mensagens com arquivos']} arquivos</span>
+                </div>
+            </div>
+        """, unsafe_allow_html=True)
+        
+        # Add chat button
+        if st.button("💬 Abrir Chat", key=f"btn_{row['Nome']}_{row['Telefone']}", use_container_width=True):
+            st.session_state.selected_sender = f"{row['Nome']} ({row['Telefone']})"
+            st.session_state.current_page = "chat"
+            st.rerun()
     
-    # Add "Load more" button if there are more results
+    # Add "Load more" button with better styling
     if len(filtered_df) > st.session_state.display_count:
         col1, col2, col3 = st.columns([1, 2, 1])
         with col2:
-            if st.button("📥 Carregar mais", key="load_more", use_container_width=True):
+            if st.button("📥 Carregar mais conversas", key="load_more", use_container_width=True):
                 st.session_state.display_count += 20
                 st.rerun()
 
@@ -369,6 +656,13 @@ elif st.session_state.current_page == "chat":
         key="chat_sender_select",
         index=list(sender_dict.keys()).index(st.session_state.get('selected_sender', list(sender_dict.keys())[0])) if 'selected_sender' in st.session_state else 0
     )
+
+    # Limpar histórico quando trocar de cliente no selectbox
+    if 'previous_sender' not in st.session_state:
+        st.session_state.previous_sender = selected_sender
+    elif st.session_state.previous_sender != selected_sender:
+        st.session_state.grok_chat_history = []
+        st.session_state.previous_sender = selected_sender
 
     if selected_sender:
         selected_info = sender_dict[selected_sender]
@@ -478,6 +772,7 @@ elif st.session_state.current_page == "chat":
                 if client_key != selected_sender:
                     if st.button("Selecionar", key=f"btn_{client_key}", use_container_width=True):
                         st.session_state.selected_sender = client_key
+                        st.session_state.grok_chat_history = []  # Limpar histórico ao trocar de cliente
                         st.rerun()
             
             # View all button
@@ -515,9 +810,6 @@ elif st.session_state.current_page == "chat":
                 st.markdown("**🔗 Links**")
                 st.markdown(f"[Abrir chat no WhatsApp]({chat_info['chat_url']})")
             
-            # Add a separator
-            st.markdown("---")
-            
             # List all image files at the top
             image_files = sender_messages[sender_messages['file_url'].notna()].copy()
             if not image_files.empty:
@@ -528,13 +820,15 @@ elif st.session_state.current_page == "chat":
                     col_idx = idx % 3
                     with cols[col_idx]:
                         st.markdown(f"📎 [{img['attachment_filename'] or 'Imagem'}]({img['file_url']})")
-                st.markdown("---")
             
             # Display messages with better formatting
             st.markdown("### Histórico de mensagens")
             
             # Sort messages in ascending order (oldest first)
             sorted_messages = sender_messages.sort_values('created_at', ascending=True)
+            
+            # Calcular tempos de resposta
+            response_times = calculate_response_time(sorted_messages)
             
             # Iterate through messages and display them as chat messages
             for _, msg in sorted_messages.iterrows():
@@ -559,22 +853,67 @@ elif st.session_state.current_page == "chat":
                 
                 # Display chat message
                 with st.chat_message(role):
-                    st.write(f"**{msg['created_at'].strftime('%d/%m/%Y %H:%M:%S')}**")
+                    timestamp = msg['created_at'].strftime('%d/%m/%Y %H:%M:%S')
+                    if msg['message_direction'] == 'received':
+                        if msg['message_uid'] in response_times:
+                            response_time = format_response_time(response_times[msg['message_uid']])
+                            st.write(f"**{timestamp}** (⏱️ Tempo de resposta: {response_time})")
+                        else:
+                            st.write(f"**{timestamp}** (⏱️ Aguardando resposta)")
+                    else:
+                        st.write(f"**{timestamp}**")
                     st.write(content)
             
-            st.markdown("---")
-            
             # Add Grok chat interface
-            st.markdown("### 🤖 Assistente Grok")
+            st.markdown("### 🤖 Assistente de IA Rosenbaum")
             
             # Initialize chat history in session state if it doesn't exist
             if 'grok_chat_history' not in st.session_state:
                 st.session_state.grok_chat_history = []
             
             # Add buttons in a single row with equal widths
-            col1, col2, col3, col4 = st.columns(4)
+            col1, col2 = st.columns(2)
             
             with col1:
+                if st.button("📄 Checklist de Documentos", type="primary", use_container_width=True):
+                    with st.spinner("Analisando documentos..."):
+                        docs_checklist = generate_missing_documents(sender_messages)
+                        if docs_checklist:
+                            st.session_state.grok_chat_history.append({
+                                "role": "assistant", 
+                                "content": f"""**📄 Checklist de Documentos para o Processo**
+
+Legenda:
+✅ - Documento já enviado (com link para visualização)
+❌ - Documento faltando
+⚠️ - Documento parcialmente enviado/incompleto
+
+{docs_checklist}
+
+Deseja que eu prepare uma mensagem solicitando os documentos faltantes?"""
+                            })
+                            st.rerun()
+                        else:
+                            st.error("Não foi possível gerar a checklist de documentos. Tente novamente.")
+            
+            with col2:
+                if st.button("⚖️ Analisar Qualidade do Processo", type="primary", use_container_width=True):
+                    with st.spinner("Analisando chances de sucesso..."):
+                        case_analysis = generate_case_analysis(sender_messages)
+                        if case_analysis:
+                            st.session_state.grok_chat_history.append({
+                                "role": "assistant", 
+                                "content": f"""**⚖️ Análise do Processo**
+{case_analysis}"""
+                            })
+                            st.rerun()
+                        else:
+                            st.error("Não foi possível gerar a análise do caso. Tente novamente.")
+
+            # Add suggestion buttons in another row
+            col3, col4 = st.columns(2)
+            
+            with col3:
                 if st.button("💡 Sugerir Resposta", use_container_width=True):
                     with st.spinner("Gerando sugestão..."):
                         suggestion = generate_suggestion(sender_messages)
@@ -584,37 +923,13 @@ elif st.session_state.current_page == "chat":
                         else:
                             st.error("Não foi possível gerar uma sugestão. Tente novamente.")
             
-            with col2:
-                # Check if there's a suggestion in the chat history
-                has_suggestion = (
-                    st.session_state.grok_chat_history and 
-                    isinstance(st.session_state.grok_chat_history[-1], dict) and
-                    st.session_state.grok_chat_history[-1].get("role") == "assistant"
-                )
-                
-                if has_suggestion:
-                    if st.button("📤 Enviar Sugestão", use_container_width=True):
-                        st.info("Funcionalidade em desenvolvimento. Em breve você poderá enviar a sugestão diretamente para o WhatsApp.")
-                else:
-                    st.button("📤 Enviar Sugestão", use_container_width=True, disabled=True)
-            
-            with col3:
-                if st.button("📄 Analisar Documentos para Processo", use_container_width=True):
-                    with st.spinner("Analisando documentos necessários..."):
-                        missing_docs = generate_missing_documents(sender_messages)
-                        if missing_docs:
-                            st.session_state.grok_chat_history.append({"role": "assistant", "content": f"**📄 Documentos Necessários para Processo:**\n\n{missing_docs}"})
-                            st.rerun()
-                        else:
-                            st.error("Não foi possível gerar a lista de documentos. Tente novamente.")
-            
             with col4:
                 if st.button("🗑️ Limpar Chat", use_container_width=True):
                     st.session_state.grok_chat_history = []
                     st.rerun()
-            
+
             # Chat input
-            if prompt := st.chat_input("Faça uma pergunta sobre a conversa..."):
+            if prompt := st.chat_input("💬 Como posso ajudar? Digite sua pergunta..."):
                 # Add user message to chat history
                 st.session_state.grok_chat_history.append({"role": "user", "content": prompt})
                 
