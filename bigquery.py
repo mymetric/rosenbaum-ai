@@ -32,7 +32,7 @@ def load_messages():
     
     # Agora vamos carregar os dados
     query = """
-    SELECT * FROM `zapy-306602.gtms.messages`
+    SELECT * FROM `zapy-306602.gtms.messages_monday`
     """
     return execute_query(query)
 
