@@ -320,7 +320,7 @@ def send_whatsapp_message(phone, message, test_mode=False, test_phone=None):
     url = "https://app.timelines.ai/integrations/api/messages"
     headers = {
         "accept": "application/json",
-        "Authorization": "Bearer f49caf9b-65bb-4b1d-82f1-cb5786ac66eb",
+        "Authorization": f"Bearer {st.secrets.timelines.api_key}",
         "Content-Type": "application/json",
         "X-CSRFToken": "TgkuQJWPDaLbuSWXe6f6vBCXZdrtfUsuRmodEaZ5pNCVpLUQPktIjvEleAb7nztu"
     }
