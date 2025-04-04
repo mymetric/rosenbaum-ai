@@ -15,6 +15,7 @@ import ssl
 import requests
 from requests.exceptions import RequestException
 import urllib3
+from monday_api import fetch_monday_updates
 
 def generate_grok_response(messages, prompt):
     # Sort messages in ascending order (oldest first)
@@ -406,6 +407,16 @@ def generate_lead_status_summary(messages, monday_info):
     
     conversation_text = "\n".join(conversation)
     
+    # Fetch Monday updates if we have an item ID
+    monday_updates = []
+    if monday_info.get('item_id'):
+        try:
+            updates = fetch_monday_updates([monday_info['item_id']])
+            if updates and len(updates) > 0:
+                monday_updates = updates[0].get('updates', [])
+        except Exception as e:
+            st.warning(f"Não foi possível buscar atualizações do Monday: {str(e)}")
+    
     # Prepare Monday info text
     monday_text = f"""
     Dados do Monday:
@@ -416,6 +427,12 @@ def generate_lead_status_summary(messages, monday_info):
     - Origem: {monday_info.get('origem', 'N/A')}
     - Email: {monday_info.get('email', 'N/A')}
     """
+    
+    # Add updates to Monday info if available
+    if monday_updates:
+        monday_text += "\nAtualizações recentes:\n"
+        for update in monday_updates:
+            monday_text += f"- {update.get('created_at', 'N/A')}: {update.get('body', 'N/A')}\n"
     
     # Prepare the prompt for lead status summary
     full_prompt = LEAD_SUMMARY_PROMPT.format(
@@ -469,8 +486,10 @@ if 'prompts' not in st.session_state:
         "summary": """Você é um assistente especializado em análise de leads jurídicos. 
 Sua função é gerar resumos claros e objetivos do status do lead, focando em informações relevantes para o acompanhamento do caso."""
     }
+if 'messages_df' not in st.session_state:
+    st.session_state.messages_df = load_messages()
 
-df = load_messages()
+df = st.session_state.messages_df
 
 # Verificar se as colunas necessárias existem
 required_columns = ['created_at', 'message_direction', 'sender_name', 'sender_phone', 'recipient_name', 'recipient_phone', 'message_uid', 'account_name', 'ocr_scan', 'file_url']
@@ -491,6 +510,17 @@ received_messages = received_messages.rename(columns={
     'sender_phone': 'Telefone'
 })
 
+# Get all messages for each conversation to determine last message direction
+all_messages = df.copy()
+all_messages['conversation_key'] = all_messages.apply(
+    lambda x: f"{x['sender_name']}_{x['sender_phone']}" if x['message_direction'] == 'received' 
+    else f"{x['recipient_name']}_{x['recipient_phone']}", 
+    axis=1
+)
+
+# Get the last message direction for each conversation
+last_directions = all_messages.sort_values('created_at').groupby('conversation_key')['message_direction'].last().reset_index()
+
 # Group by sender name and phone
 grouped_df = received_messages.groupby(['Nome', 'Telefone']).agg({
     'message_uid': 'count',  # Count of messages
@@ -500,13 +530,30 @@ grouped_df = received_messages.groupby(['Nome', 'Telefone']).agg({
     'file_url': lambda x: x.notna().sum()  # Count messages with files
 }).reset_index()
 
+# Add conversation key to match with last_directions
+grouped_df['conversation_key'] = grouped_df.apply(
+    lambda x: f"{x['Nome']}_{x['Telefone']}", 
+    axis=1
+)
+
+# Merge with last_directions to get the last message direction
+grouped_df = grouped_df.merge(
+    last_directions,
+    on='conversation_key',
+    how='left'
+)
+
+# Drop the conversation_key column
+grouped_df = grouped_df.drop('conversation_key', axis=1)
+
 # Rename columns for better understanding
 grouped_df = grouped_df.rename(columns={
     'message_uid': 'Total de mensagens recebidas',
     'created_at': 'Última mensagem',
     'account_name': 'Conta',
     'ocr_scan': 'Mensagens com OCR',
-    'file_url': 'Mensagens com arquivos'
+    'file_url': 'Mensagens com arquivos',
+    'message_direction': 'Última direção'
 })
 
 # Sort by latest message timestamp
@@ -533,6 +580,31 @@ with st.sidebar:
     if st.button("📝 Gerenciar Prompts", use_container_width=True):
         st.session_state.current_page = "prompts"
         st.rerun()
+
+# Add refresh button to sidebar
+with st.sidebar:
+    if st.button("🔄 Atualizar Dados", use_container_width=True):
+        with st.spinner("Atualizando dados do BigQuery..."):
+            # Limpar todos os estados relevantes
+            if 'messages_df' in st.session_state:
+                del st.session_state.messages_df
+            if 'lead_summary' in st.session_state:
+                del st.session_state.lead_summary
+            if 'grok_chat_history' in st.session_state:
+                del st.session_state.grok_chat_history
+            if 'message_key' in st.session_state:
+                del st.session_state.message_key
+            if 'message_length' in st.session_state:
+                del st.session_state.message_length
+            if 'suggestion' in st.session_state:
+                del st.session_state.suggestion
+            if 'new_suggestion' in st.session_state:
+                del st.session_state.new_suggestion
+            
+            # Recarregar dados do BigQuery
+            st.session_state.messages_df = load_messages()
+            st.success("✅ Dados atualizados com sucesso!")
+            st.rerun()
 
 # Page content
 if st.session_state.current_page == "prompts":
@@ -1005,11 +1077,14 @@ elif st.session_state.current_page == "inbox":
     
     # Create a container for the conversation list
     for _, row in filtered_df.head(st.session_state.display_count).iterrows():
+        # Determinar o ícone baseado na direção da última mensagem
+        last_message_icon = "👤" if row['Última direção'] == 'received' else "💬"
+        
         st.markdown(f"""
             <div class='conversation-card'>
                 <div class='conversation-header'>
                     <div class='conversation-name'>
-                        {row['Nome']} • 📱 {row['Telefone']}
+                        {last_message_icon} {row['Nome']} • 📱 {row['Telefone']}
                     </div>
                     <div class='conversation-time'>
                         ⏰ {row['Última mensagem'].strftime('%d/%m/%Y %H:%M')}
@@ -1281,6 +1356,74 @@ elif st.session_state.current_page == "chat":
                 else:
                     st.markdown("**Link do Monday:** N/A")
             
+            # Add Monday updates section
+            if monday_id != 'N/A':
+                try:
+                    updates = fetch_monday_updates([monday_id])
+                    if updates and len(updates) > 0 and updates[0].get('updates'):
+                        # Sort updates by date (newest first)
+                        sorted_updates = sorted(updates[0]['updates'], 
+                                              key=lambda x: x.get('created_at', ''), 
+                                              reverse=True)
+                        
+                        # Use Streamlit expander instead of custom HTML
+                        with st.expander("📝 Atualizações do Monday", expanded=False):
+                            for update in sorted_updates:
+                                created_at = update.get('created_at', 'N/A')
+                                body = update.get('body', 'N/A')
+                                
+                                # Safely get creator name, handling None case
+                                is_system = not update.get('creator')
+                                creator_name = "🤖 Atualização do Sistema" if is_system else update['creator'].get('name', 'Usuário desconhecido')
+                                creator_icon = "⚙️" if is_system else "👤"
+                                
+                                # Adjust time to Brasília timezone (UTC-3)
+                                try:
+                                    if created_at != 'N/A':
+                                        # Parse the ISO format date
+                                        from datetime import datetime
+                                        import pytz
+                                        
+                                        # Parse the date string to datetime object
+                                        dt = datetime.fromisoformat(created_at.replace('Z', '+00:00'))
+                                        
+                                        # Convert to Brasília timezone
+                                        brasilia_tz = pytz.timezone('America/Sao_Paulo')
+                                        dt_brasilia = dt.astimezone(brasilia_tz)
+                                        
+                                        # Format the date in a more readable way
+                                        formatted_date = dt_brasilia.strftime('%d/%m/%Y %H:%M:%S')
+                                        created_at = formatted_date
+                                except Exception as e:
+                                    # If there's any error in date conversion, keep the original
+                                    pass
+                                
+                                # Display author and date with different styling for system updates
+                                st.markdown(f"""
+                                    <div style='
+                                        background-color: {'#f0f4f8' if is_system else '#f8f9fa'};
+                                        padding: 8px 12px;
+                                        border-radius: 6px;
+                                        margin-bottom: 8px;
+                                        display: flex;
+                                        align-items: center;
+                                        gap: 8px;
+                                    '>
+                                        <span style='
+                                            font-weight: 500;
+                                            color: {'#4a5568' if is_system else '#2d3748'};
+                                        '>{creator_name}</span>
+                                        <span style='color: #666;'>•</span>
+                                        <span style='color: #666;'>📅 {created_at}</span>
+                                    </div>
+                                """, unsafe_allow_html=True)
+                                
+                                # Render the body content as HTML
+                                st.markdown(body, unsafe_allow_html=True)
+                                st.divider()
+                except Exception as e:
+                    st.warning(f"Não foi possível buscar atualizações do Monday: {str(e)}")
+            
             # Add Timelines data section
             st.markdown('<div class="section-title">📋 Dados do Timelines</div>', unsafe_allow_html=True)
             col1, col2, col3 = st.columns(3)
@@ -1333,16 +1476,19 @@ elif st.session_state.current_page == "chat":
                 content = msg['message_text'] or ''
                 
                 # Add file information if present
-                if msg['file_url']:
+                if msg['file_url'] and pd.notna(msg['file_url']):
                     content += f"\n📎 [Abrir arquivo]({msg['file_url']})"
                 
                 # Add OCR information if present
-                if msg['ocr_scan']:
+                if msg['ocr_scan'] and pd.notna(msg['ocr_scan']):
                     content += f"\n🔍 OCR: {msg['ocr_scan']}"
                 
-                if msg['attachment_filename']:
+                # Add attachment filename if present and valid
+                if msg['attachment_filename'] and pd.notna(msg['attachment_filename']):
                     content += f"\n📎 Anexo: {msg['attachment_filename']}"
-                if msg['audio_transcription']:
+                
+                # Add audio transcription if present
+                if msg['audio_transcription'] and pd.notna(msg['audio_transcription']):
                     content += f"\n🎤 Transcrição: {msg['audio_transcription']}"
                 
                 # Display chat message
@@ -1546,8 +1692,8 @@ elif st.session_state.current_page == "chat":
                     )
                     if success:
                         # Adicionar mensagem ao histórico
-                        df = add_message_to_history(
-                            df,
+                        st.session_state.messages_df = add_message_to_history(
+                            st.session_state.messages_df,
                             sender_name="Atendente",
                             sender_phone="+5511988094449",
                             recipient_name=selected_name,
@@ -1555,18 +1701,11 @@ elif st.session_state.current_page == "chat":
                             message_text=whatsapp_message,
                             message_direction='sent'
                         )
+                        df = st.session_state.messages_df
                         
-                        # Recarregar mensagens do BigQuery
-                        df = load_messages()
-                        
-                        # Converter created_at para datetime e ajustar timezone
-                        df['created_at'] = pd.to_datetime(df['created_at']).dt.tz_convert('America/Sao_Paulo')
-                        
-                        # Atualizar histórico de mensagens do cliente
-                        sender_messages = df[
-                            ((df['sender_name'].fillna('') == selected_name) & (df['sender_phone'].fillna('') == selected_phone)) |
-                            ((df['recipient_name'].fillna('') == selected_name) & (df['recipient_phone'].fillna('') == selected_phone))
-                        ].sort_values('created_at', ascending=False)
+                        # Atualizar sender_messages com a nova mensagem
+                        new_message = st.session_state.messages_df.iloc[0]  # Pega a última mensagem adicionada
+                        sender_messages = pd.concat([pd.DataFrame([new_message]), sender_messages], ignore_index=True)
                         
                         st.success(message)
                         
