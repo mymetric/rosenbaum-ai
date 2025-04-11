@@ -488,6 +488,8 @@ Sua função é gerar resumos claros e objetivos do status do lead, focando em i
     }
 if 'messages_df' not in st.session_state:
     st.session_state.messages_df = load_messages()
+if 'grok_chat_history' not in st.session_state:
+    st.session_state.grok_chat_history = []
 
 df = st.session_state.messages_df
 
@@ -1135,6 +1137,7 @@ elif st.session_state.current_page == "chat":
         st.session_state.previous_sender = selected_sender
     elif st.session_state.previous_sender != selected_sender:
         st.session_state.grok_chat_history = []
+        st.session_state.lead_summary = None  # Reset lead summary when changing leads
         st.session_state.previous_sender = selected_sender
 
     if selected_sender:
@@ -1246,6 +1249,7 @@ elif st.session_state.current_page == "chat":
                     if st.button("Selecionar", key=f"btn_{client_key}", use_container_width=True):
                         st.session_state.selected_sender = client_key
                         st.session_state.grok_chat_history = []  # Limpar histórico ao trocar de cliente
+                        st.session_state.lead_summary = None  # Reset lead summary when changing leads
                         st.rerun()
             
             # View all button
@@ -1424,6 +1428,77 @@ elif st.session_state.current_page == "chat":
                 except Exception as e:
                     st.warning(f"Não foi possível buscar atualizações do Monday: {str(e)}")
             
+            # Add lead summary section
+            st.markdown('<div class="section-title">📊 Resumo do Lead</div>', unsafe_allow_html=True)
+            
+            # Initialize lead summary in session state if not exists
+            if 'lead_summary' not in st.session_state:
+                st.session_state.lead_summary = None
+            
+            # Generate lead summary if not exists
+            if st.session_state.lead_summary is None:
+                with st.spinner("Gerando resumo do lead..."):
+                    monday_info = {
+                        'item_id': monday_id,
+                        'name': chat_info.get('name', 'N/A'),
+                        'title': chat_info.get('title', 'N/A'),
+                        'status': chat_info.get('status', 'N/A'),
+                        'prioridade': chat_info.get('prioridade', 'N/A'),
+                        'origem': chat_info.get('origem', 'N/A'),
+                        'email': chat_info.get('email', 'N/A')
+                    }
+                    st.session_state.lead_summary = generate_lead_status_summary(sender_messages, monday_info)
+            
+            # Display lead summary in an expander
+            if st.session_state.lead_summary:
+                with st.expander("📊 Resumo do Lead", expanded=True):
+                    st.markdown(f"""
+                        <div class="lead-summary-container">
+                            {st.session_state.lead_summary}
+                        </div>
+                    """, unsafe_allow_html=True)
+            else:
+                st.error("Não foi possível gerar o resumo do lead. Tente novamente.")
+            
+            # Add AI buttons
+            st.markdown('<div class="section-title">🤖 Ferramentas de IA</div>', unsafe_allow_html=True)
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button("📄 Checklist de Documentos", use_container_width=True):
+                    with st.spinner("Analisando documentos..."):
+                        docs_checklist = generate_missing_documents(sender_messages)
+                        if docs_checklist:
+                            st.session_state.grok_chat_history.append({
+                                "role": "assistant", 
+                                "content": f"""**📄 Checklist de Documentos para o Processo**
+
+Legenda:
+✅ - Documento já enviado (com link para visualização)
+❌ - Documento faltando
+⚠️ - Documento parcialmente enviado/incompleto
+
+{docs_checklist}
+
+Deseja que eu prepare uma mensagem solicitando os documentos faltantes?"""
+                            })
+                            st.rerun()
+                        else:
+                            st.error("Não foi possível gerar a checklist de documentos. Tente novamente.")
+            
+            with col2:
+                if st.button("⚖️ Analisar Qualidade do Processo", use_container_width=True):
+                    with st.spinner("Analisando chances de sucesso..."):
+                        case_analysis = generate_case_analysis(sender_messages)
+                        if case_analysis:
+                            st.session_state.grok_chat_history.append({
+                                "role": "assistant", 
+                                "content": f"""**⚖️ Análise do Processo**
+{case_analysis}"""
+                            })
+                            st.rerun()
+                        else:
+                            st.error("Não foi possível gerar a análise do caso. Tente novamente.")
+            
             # Add Timelines data section
             st.markdown('<div class="section-title">📋 Dados do Timelines</div>', unsafe_allow_html=True)
             col1, col2, col3 = st.columns(3)
@@ -1467,8 +1542,47 @@ elif st.session_state.current_page == "chat":
             # Calcular tempos de resposta
             response_times = calculate_response_time(sorted_messages)
             
+            # Initialize message display limit in session state if not exists
+            if 'message_display_limit' not in st.session_state:
+                st.session_state.message_display_limit = 10
+            
+            # Add buttons for loading messages
+            col1, col2 = st.columns(2)
+            with col1:
+                if len(sorted_messages) > st.session_state.message_display_limit:
+                    if st.button("📥 Ver mensagens mais antigas", use_container_width=True):
+                        st.session_state.message_display_limit += 10
+                        st.rerun()
+            with col2:
+                if len(sorted_messages) > st.session_state.message_display_limit:
+                    if st.button("📚 Carregar todo o histórico", use_container_width=True):
+                        st.session_state.message_display_limit = len(sorted_messages)
+                        st.rerun()
+            
+            # Get messages to display
+            messages_to_display = sorted_messages.tail(st.session_state.message_display_limit)
+            
             # Iterate through messages and display them as chat messages
-            for _, msg in sorted_messages.iterrows():
+            current_date = None
+            for _, msg in messages_to_display.iterrows():
+                # Check if date has changed
+                message_date = msg['created_at'].strftime('%d/%m/%Y')
+                if current_date != message_date:
+                    current_date = message_date
+                    st.markdown(f"""
+                        <div style='
+                            text-align: center;
+                            margin: 1rem 0;
+                            padding: 0.5rem;
+                            background-color: #f0f2f6;
+                            border-radius: 0.5rem;
+                            color: #666;
+                            font-weight: 500;
+                        '>
+                            📅 {current_date}
+                        </div>
+                    """, unsafe_allow_html=True)
+                
                 # Determine message role
                 role = "user" if msg['message_direction'] == 'received' else "assistant"
                 
@@ -1493,7 +1607,7 @@ elif st.session_state.current_page == "chat":
                 
                 # Display chat message
                 with st.chat_message(role):
-                    timestamp = msg['created_at'].strftime('%d/%m/%Y %H:%M:%S')
+                    timestamp = msg['created_at'].strftime('%H:%M')
                     if msg['message_direction'] == 'received':
                         if msg['message_uid'] in response_times:
                             response_time = format_response_time(response_times[msg['message_uid']])
@@ -1503,280 +1617,33 @@ elif st.session_state.current_page == "chat":
                     else:
                         st.write(f"**{timestamp}**")
                     st.write(content)
-            
-            # Add lead status summary in a collapsible section after the last message
-            if 'lead_summary' not in st.session_state:
-                with st.spinner("Gerando resumo do lead..."):
-                    st.session_state.lead_summary = generate_lead_status_summary(sender_messages, chat_info)
-            
-            if st.session_state.lead_summary:
-                with st.expander("📊 Resumo do Lead", expanded=False):
-                    st.markdown(st.session_state.lead_summary)
-            
-            # Add WhatsApp chat interface
-            st.markdown("### 💬 Chat com Cliente")
-            
-            # Add custom CSS for the message input section
-            st.markdown("""
-                <style>
-                .message-counter {
-                    font-size: 0.8em;
-                    color: #666;
-                    text-align: right;
-                    margin-top: 0.5rem;
-                }
-                .message-counter.warning {
-                    color: #ffa500;
-                }
-                .message-counter.error {
-                    color: #ff4444;
-                }
-                .whatsapp-button {
-                    background-color: #25D366 !important;
-                    color: white !important;
-                    border: none !important;
-                    padding: 0.5rem 1rem !important;
-                    border-radius: 0.5rem !important;
-                    font-weight: 500 !important;
-                    transition: all 0.3s ease !important;
-                    display: flex !important;
-                    align-items: center !important;
-                    justify-content: center !important;
-                    gap: 0.5rem !important;
-                }
-                .whatsapp-button:hover {
-                    background-color: #128C7E !important;
-                    transform: translateY(-2px);
-                    box-shadow: 0 4px 8px rgba(37, 211, 102, 0.2);
-                }
-                .whatsapp-button:disabled {
-                    background-color: #cccccc !important;
-                    cursor: not-allowed;
-                }
-                .stButton button[data-testid="suggestion_button"] {
-                    background-color: #ff4444 !important;
-                    color: white !important;
-                    border: none !important;
-                    padding: 0.5rem 1rem !important;
-                    border-radius: 0.5rem !important;
-                    font-weight: 500 !important;
-                    transition: all 0.3s ease !important;
-                    display: flex !important;
-                    align-items: center !important;
-                    justify-content: center !important;
-                    gap: 0.5rem !important;
-                }
-                .stButton button[data-testid="suggestion_button"]:hover {
-                    background-color: #cc0000 !important;
-                    transform: translateY(-2px);
-                    box-shadow: 0 4px 8px rgba(255, 68, 68, 0.2);
-                }
-                </style>
-            """, unsafe_allow_html=True)
-            
-            # Initialize test mode state
-            if 'test_mode' not in st.session_state:
-                st.session_state.test_mode = True  # Modo teste ativado por padrão
-            if 'test_phone' not in st.session_state:
-                st.session_state.test_phone = "31992251502"  # Número de teste padrão
-            
-            # Add test mode selector and test phone input in columns
-            test_col1, test_col2 = st.columns([2, 1])
-            with test_col1:
-                test_mode = st.selectbox(
-                    "🔧 Modo de Envio",
-                    ["Modo Teste", "Modo Real"],
-                    index=0 if st.session_state.test_mode else 1,
-                    key="test_mode_select"
-                )
-            with test_col2:
-                if test_mode == "Modo Teste":
-                    test_phone = st.text_input(
-                        "📱 Número de Teste",
-                        value=st.session_state.test_phone,
-                        key="test_phone_input"
-                    )
-                    st.session_state.test_phone = test_phone
-            
-            # Update test mode state
-            st.session_state.test_mode = test_mode == "Modo Teste"
-            
-            if st.session_state.test_mode:
-                st.info(f"🔧 Modo Teste Ativado - As mensagens serão enviadas para o número de teste ({st.session_state.test_phone})")
-            else:
-                st.warning("⚠️ Modo Real Ativado - As mensagens serão enviadas para o número do cliente")
-            
-            # Add suggestion button with full width and red style
-            if st.button("💡 Sugerir Resposta", use_container_width=True, key="suggestion_button"):
-                with st.spinner("Gerando sugestão..."):
-                    suggestion = generate_suggestion(sender_messages)
-                    if suggestion:
-                        # Armazenar a sugestão no estado da sessão
-                        st.session_state.suggestion = suggestion
-                        # Atualizar o comprimento da mensagem
-                        st.session_state.message_length = len(suggestion)
-                        # Atualizar a chave da mensagem para forçar uma nova instância do widget
-                        st.session_state.message_key += 1
-                        # Marcar que uma nova sugestão foi gerada
-                        st.session_state.new_suggestion = True
-                        st.rerun()
-                    else:
-                        st.error("Não foi possível gerar uma sugestão. Tente novamente.")
-            
-            # Apply custom styling to the suggestion button
-            st.markdown("""
-                <script>
-                document.querySelector('[data-testid="stButton"] button').classList.add('suggestion-button');
-                </script>
-            """, unsafe_allow_html=True)
-            
-            # Inicializar variáveis de estado se não existirem
-            if 'suggestion' not in st.session_state:
-                st.session_state.suggestion = ""
-            if 'message_length' not in st.session_state:
-                st.session_state.message_length = 0
-            if 'message_key' not in st.session_state:
-                st.session_state.message_key = 0
-            if 'new_suggestion' not in st.session_state:
-                st.session_state.new_suggestion = False
-            
-            # Add message input and character counter
-            message_key = f"whatsapp_message_{st.session_state.message_key}"
-            whatsapp_message = st.text_area(
-                "💬 Mensagem para WhatsApp:",
-                placeholder="Digite sua mensagem...",
-                height=100,
-                key=message_key,
-                value=st.session_state.get(message_key, st.session_state.suggestion if st.session_state.new_suggestion else ""),
-                on_change=lambda: setattr(st.session_state, 'message_length', len(st.session_state.get(message_key, "")))
-            )
-
-            # Limpar a sugestão após usar
-            if st.session_state.new_suggestion:
-                st.session_state.message_length = len(st.session_state.suggestion)
-                st.session_state.new_suggestion = False
-
-            # Display character counter with color coding
-            counter_class = "message-counter"
-            if st.session_state.message_length > 1000:
-                counter_class += " error"
-            elif st.session_state.message_length > 800:
-                counter_class += " warning"
-            
-            st.markdown(f'<div class="{counter_class}">{st.session_state.message_length}/1000 caracteres</div>', unsafe_allow_html=True)
-            
-            # Add send button below the text input
-            send_button = st.button(
-                "📤 Enviar Mensagem",
-                use_container_width=True,
-                type="primary",
-                disabled=len(whatsapp_message) == 0 or len(whatsapp_message) > 1000,
-                key="send_button",
-                help="Enviar mensagem via WhatsApp"
-            )
-            
-            # Apply custom styling to the button
-            st.markdown("""
-                <script>
-                document.querySelector('[data-testid="stButton"] button').classList.add('whatsapp-button');
-                </script>
-            """, unsafe_allow_html=True)
-            
-            if send_button:
-                if whatsapp_message:
-                    success, message = send_whatsapp_message(
-                        selected_phone, 
-                        whatsapp_message, 
-                        st.session_state.test_mode,
-                        st.session_state.test_phone
-                    )
-                    if success:
-                        # Adicionar mensagem ao histórico
-                        st.session_state.messages_df = add_message_to_history(
-                            st.session_state.messages_df,
-                            sender_name="Atendente",
-                            sender_phone="+5511988094449",
-                            recipient_name=selected_name,
-                            recipient_phone=selected_phone,
-                            message_text=whatsapp_message,
-                            message_direction='sent'
-                        )
-                        df = st.session_state.messages_df
-                        
-                        # Atualizar sender_messages com a nova mensagem
-                        new_message = st.session_state.messages_df.iloc[0]  # Pega a última mensagem adicionada
-                        sender_messages = pd.concat([pd.DataFrame([new_message]), sender_messages], ignore_index=True)
-                        
-                        st.success(message)
-                        
-                        # Limpar estados
-                        st.session_state.message_key += 1
-                        st.session_state.message_length = 0
-                        st.session_state.suggestion = ""
-                        st.session_state.new_suggestion = False
-                        
-                        # Recarregar a página
-                        st.rerun()
-                    else:
-                        st.error(message)
-                else:
-                    st.warning("Por favor, digite uma mensagem para enviar.")
-            
-            # Add Grok chat interface
-            st.markdown("### 🤖 Assistente de IA Rosenbaum")
-            
-            # Initialize chat history in session state if it doesn't exist
-            if 'grok_chat_history' not in st.session_state:
-                st.session_state.grok_chat_history = []
-            
-            # Add buttons in a single row with equal widths
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                if st.button("📄 Checklist de Documentos", use_container_width=True):
-                    with st.spinner("Analisando documentos..."):
-                        docs_checklist = generate_missing_documents(sender_messages)
-                        if docs_checklist:
-                            st.session_state.grok_chat_history.append({
-                                "role": "assistant", 
-                                "content": f"""**📄 Checklist de Documentos para o Processo**
-
-Legenda:
-✅ - Documento já enviado (com link para visualização)
-❌ - Documento faltando
-⚠️ - Documento parcialmente enviado/incompleto
-
-{docs_checklist}
-
-Deseja que eu prepare uma mensagem solicitando os documentos faltantes?"""
-                            })
-                            st.rerun()
-                        else:
-                            st.error("Não foi possível gerar a checklist de documentos. Tente novamente.")
-            
-            with col2:
-                if st.button("⚖️ Analisar Qualidade do Processo", use_container_width=True):
-                    with st.spinner("Analisando chances de sucesso..."):
-                        case_analysis = generate_case_analysis(sender_messages)
-                        if case_analysis:
-                            st.session_state.grok_chat_history.append({
-                                "role": "assistant", 
-                                "content": f"""**⚖️ Análise do Processo**
-{case_analysis}"""
-                            })
-                            st.rerun()
-                        else:
-                            st.error("Não foi possível gerar a análise do caso. Tente novamente.")
-
-            # Display chat history for AI bot
-            for message in st.session_state.grok_chat_history:
-                with st.chat_message(message["role"]):
-                    st.write(message["content"])
 
             # Add clear chat button below the chat history
             if st.button("🗑️ Limpar Chat", use_container_width=True):
                 st.session_state.grok_chat_history = []
                 st.rerun()
+
+            # Display AI chat history
+            for message in st.session_state.grok_chat_history:
+                with st.chat_message(message["role"]):
+                    st.write(message["content"])
+
+            # Add suggestion button after chat history
+            if st.button("💡 Sugerir Resposta", use_container_width=True):
+                with st.spinner("Gerando sugestão de resposta..."):
+                    suggestion = generate_suggestion(sender_messages)
+                    if suggestion:
+                        st.session_state.grok_chat_history.append({
+                            "role": "assistant", 
+                            "content": f"""**💡 Sugestão de Resposta**
+
+{suggestion}
+
+Deseja que eu envie esta mensagem?"""
+                        })
+                        st.rerun()
+                    else:
+                        st.error("Não foi possível gerar uma sugestão de resposta. Tente novamente.")
 
             # Chat input for AI bot
             if prompt := st.chat_input("💬 Como posso ajudar? Digite sua pergunta..."):
@@ -1796,3 +1663,38 @@ Deseja que eu prepare uma mensagem solicitando os documentos faltantes?"""
                             st.session_state.grok_chat_history.append({"role": "assistant", "content": response})
                         else:
                             st.error("Não foi possível gerar uma resposta. Tente novamente.")
+
+            # Add WhatsApp message section
+            st.markdown("### 💬 Enviar Mensagem")
+            message = st.text_area("Digite sua mensagem:", height=100)
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button("📤 Enviar Mensagem", use_container_width=True):
+                    if message:
+                        success, result = send_whatsapp_message(selected_phone, message)
+                        if success:
+                            st.success(result)
+                            # Add message to history
+                            st.session_state.messages_df = add_message_to_history(
+                                st.session_state.messages_df,
+                                "Rosenbaum Advogados",
+                                "+5511988094449",
+                                selected_name,
+                                selected_phone,
+                                message
+                            )
+                            st.rerun()
+                        else:
+                            st.error(result)
+                    else:
+                        st.error("Por favor, digite uma mensagem para enviar.")
+            with col2:
+                if st.button("📤 Enviar Mensagem (Modo Teste)", use_container_width=True):
+                    if message:
+                        success, result = send_whatsapp_message(selected_phone, message, test_mode=True, test_phone="+5511999999999")
+                        if success:
+                            st.success(result)
+                        else:
+                            st.error(result)
+                    else:
+                        st.error("Por favor, digite uma mensagem para enviar.")
