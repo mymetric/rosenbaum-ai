@@ -43,14 +43,14 @@ def generate_grok_response(messages, prompt):
     )
     
     # Call Grok API
-    url = "https://api.x.ai/v1/chat/completions"
+    url = "https://api.x.ai/v1"
     headers = {
         "Authorization": f"Bearer {st.secrets.grok.api_key}",
         "Content-Type": "application/json"
     }
     
     data = {
-        "model": "grok-2-latest",
+        "model": "grok-3-latest",
         "messages": [
             {"role": "system", "content": SYSTEM_PROMPTS["general"]},
             {"role": "user", "content": full_prompt}
@@ -60,7 +60,7 @@ def generate_grok_response(messages, prompt):
     }
     
     try:
-        with httpx.Client(verify=True, timeout=30.0) as client:
+        with httpx.Client(verify=True, timeout=60.0) as client:
             response = client.post(url, headers=headers, json=data)
             response.raise_for_status()
             result = response.json()
@@ -119,7 +119,7 @@ def generate_suggestion(messages):
     }
     
     data = {
-        "model": "grok-2-latest",
+        "model": "grok-3-latest",
         "messages": [
             {"role": "system", "content": SYSTEM_PROMPTS["suggestion"]},
             {"role": "user", "content": full_prompt}
@@ -129,7 +129,7 @@ def generate_suggestion(messages):
     }
     
     try:
-        with httpx.Client(verify=True, timeout=30.0) as client:
+        with httpx.Client(verify=True, timeout=60.0) as client:
             response = client.post(url, headers=headers, json=data)
             response.raise_for_status()
             result = response.json()
@@ -182,7 +182,7 @@ def generate_missing_documents(messages):
     }
     
     data = {
-        "model": "grok-2-latest",
+        "model": "grok-3-latest",
         "messages": [
             {"role": "system", "content": SYSTEM_PROMPTS["documents"]},
             {"role": "user", "content": full_prompt}
@@ -192,7 +192,7 @@ def generate_missing_documents(messages):
     }
     
     try:
-        with httpx.Client(verify=True, timeout=30.0) as client:
+        with httpx.Client(verify=True, timeout=60.0) as client:
             response = client.post(url, headers=headers, json=data)
             response.raise_for_status()
             result = response.json()
@@ -244,7 +244,7 @@ def generate_case_analysis(messages):
     }
     
     data = {
-        "model": "grok-2-latest",
+        "model": "grok-3-latest",
         "messages": [
             {"role": "system", "content": SYSTEM_PROMPTS["case_analysis"]},
             {"role": "user", "content": full_prompt}
@@ -254,7 +254,7 @@ def generate_case_analysis(messages):
     }
     
     try:
-        with httpx.Client(verify=True, timeout=30.0) as client:
+        with httpx.Client(verify=True, timeout=60.0) as client:
             response = client.post(url, headers=headers, json=data)
             response.raise_for_status()
             result = response.json()
@@ -448,7 +448,7 @@ def generate_lead_status_summary(messages, monday_info):
     }
     
     data = {
-        "model": "grok-2-latest",
+        "model": "grok-3-latest",
         "messages": [
             {"role": "system", "content": SYSTEM_PROMPTS["summary"]},
             {"role": "user", "content": full_prompt}
@@ -458,7 +458,7 @@ def generate_lead_status_summary(messages, monday_info):
     }
     
     try:
-        with httpx.Client(verify=True, timeout=30.0) as client:
+        with httpx.Client(verify=True, timeout=60.0) as client:
             response = client.post(url, headers=headers, json=data)
             response.raise_for_status()
             result = response.json()
@@ -471,6 +471,21 @@ st.set_page_config(
     page_title="Rosenbaum Advogados AI",
     layout="wide"
 )
+
+# Add global CSS styles
+st.markdown("""
+    <style>
+    /* Global styles */
+    * {
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif !important;
+    }
+    
+    /* Override any specific font-family declarations */
+    .stApp, .stChatMessage, .stMarkdown, .stTextInput, .stTextArea, .stButton, .stSelectbox, .stExpander {
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif !important;
+    }
+    </style>
+""", unsafe_allow_html=True)
 
 # Initialize session state for navigation and pagination
 if 'current_page' not in st.session_state:
@@ -509,7 +524,7 @@ df['created_at'] = pd.to_datetime(df['created_at']).dt.tz_convert('America/Sao_P
 received_messages = df[df['message_direction'] == 'received'].copy()
 received_messages = received_messages.rename(columns={
     'sender_name': 'Nome',
-    'sender_phone': 'Telefone'
+    'sender_phone': 'Telefone' if 'sender_phone' in received_messages.columns else 'sender_phone'
 })
 
 # Get all messages for each conversation to determine last message direction
@@ -524,7 +539,8 @@ all_messages['conversation_key'] = all_messages.apply(
 last_directions = all_messages.sort_values('created_at').groupby('conversation_key')['message_direction'].last().reset_index()
 
 # Group by sender name and phone
-grouped_df = received_messages.groupby(['Nome', 'Telefone']).agg({
+grouping_columns = ['Nome', 'Telefone'] if 'Telefone' in received_messages.columns else ['Nome', 'sender_phone']
+grouped_df = received_messages.groupby(grouping_columns).agg({
     'message_uid': 'count',  # Count of messages
     'created_at': 'max',  # Get the latest message date
     'account_name': 'first',  # Get account name
@@ -534,7 +550,7 @@ grouped_df = received_messages.groupby(['Nome', 'Telefone']).agg({
 
 # Add conversation key to match with last_directions
 grouped_df['conversation_key'] = grouped_df.apply(
-    lambda x: f"{x['Nome']}_{x['Telefone']}", 
+    lambda x: f"{x['Nome']}_{x['Telefone']}" if 'Telefone' in grouped_df.columns else f"{x['Nome']}_{x['sender_phone']}", 
     axis=1
 )
 
@@ -1086,7 +1102,7 @@ elif st.session_state.current_page == "inbox":
             <div class='conversation-card'>
                 <div class='conversation-header'>
                     <div class='conversation-name'>
-                        {last_message_icon} {row['Nome']} • 📱 {row['Telefone']}
+                        {last_message_icon} {row['Nome']} • {row['Telefone']}
                     </div>
                     <div class='conversation-time'>
                         ⏰ {row['Última mensagem'].strftime('%d/%m/%Y %H:%M')}
@@ -1101,7 +1117,7 @@ elif st.session_state.current_page == "inbox":
         """, unsafe_allow_html=True)
         
         # Add chat button
-        if st.button("💬 Abrir Chat", key=f"btn_{row['Nome']}_{row['Telefone']}", use_container_width=True):
+        if st.button("💬 Abrir Chat", key=f"btn_{row['Nome']}_{row['Telefone']}" if pd.notna(row.get('Telefone')) else f"btn_{row['Nome']}", use_container_width=True):
             st.session_state.selected_sender = f"{row['Nome']} ({row['Telefone']})"
             st.session_state.current_page = "chat"
             st.rerun()
@@ -1426,7 +1442,8 @@ elif st.session_state.current_page == "chat":
                                 st.markdown(body, unsafe_allow_html=True)
                                 st.divider()
                 except Exception as e:
-                    st.warning(f"Não foi possível buscar atualizações do Monday: {str(e)}")
+                    # Don't show the error message, just skip the updates section
+                    pass
             
             # Add lead summary section
             st.markdown('<div class="section-title">📊 Resumo do Lead</div>', unsafe_allow_html=True)
@@ -1617,7 +1634,7 @@ Deseja que eu prepare uma mensagem solicitando os documentos faltantes?"""
                     else:
                         st.write(f"**{timestamp}**")
                     st.write(content)
-
+            
             # Add clear chat button below the chat history
             if st.button("🗑️ Limpar Chat", use_container_width=True):
                 st.session_state.grok_chat_history = []
@@ -1627,20 +1644,14 @@ Deseja que eu prepare uma mensagem solicitando os documentos faltantes?"""
             for message in st.session_state.grok_chat_history:
                 with st.chat_message(message["role"]):
                     st.write(message["content"])
-
+            
             # Add suggestion button after chat history
             if st.button("💡 Sugerir Resposta", use_container_width=True):
                 with st.spinner("Gerando sugestão de resposta..."):
                     suggestion = generate_suggestion(sender_messages)
                     if suggestion:
-                        st.session_state.grok_chat_history.append({
-                            "role": "assistant", 
-                            "content": f"""**💡 Sugestão de Resposta**
-
-{suggestion}
-
-Deseja que eu envie esta mensagem?"""
-                        })
+                        # Set the suggestion in session state to be used in the message input
+                        st.session_state.suggested_message = suggestion
                         st.rerun()
                     else:
                         st.error("Não foi possível gerar uma sugestão de resposta. Tente novamente.")
@@ -1666,7 +1677,15 @@ Deseja que eu envie esta mensagem?"""
 
             # Add WhatsApp message section
             st.markdown("### 💬 Enviar Mensagem")
-            message = st.text_area("Digite sua mensagem:", height=100)
+            # Initialize message input with suggested message if available
+            message = st.text_area(
+                "Digite sua mensagem:", 
+                height=100,
+                value=st.session_state.get('suggested_message', '')
+            )
+            # Clear the suggested message after it's been used
+            if 'suggested_message' in st.session_state:
+                del st.session_state.suggested_message
             col1, col2 = st.columns(2)
             with col1:
                 if st.button("📤 Enviar Mensagem", use_container_width=True):
