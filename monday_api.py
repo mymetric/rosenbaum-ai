@@ -1,6 +1,7 @@
 import requests
 import json
 from typing import List, Dict, Any
+import streamlit as st
 
 def fetch_monday_updates(item_ids: List[str], limit: int = 100) -> List[Dict[Any, Any]]:
     """
@@ -13,7 +14,7 @@ def fetch_monday_updates(item_ids: List[str], limit: int = 100) -> List[Dict[Any
     Returns:
         List[Dict]: List of items with their updates
     """
-    api_key = "eyJhbGciOiJIUzI1NiJ9.eyJ0aWQiOjMyMTMyNzgzNCwiYWFpIjoxMSwidWlkIjoxNDU1MDMyNSwiaWFkIjoiMjAyNC0wMi0xNVQwMDowNDoyNi40NTZaIiwicGVyIjoibWU6d3JpdGUiLCJhY3RpZCI6NjQzNzE1MiwicmduIjoidXNlMSJ9.s7yO5EF65oU6e4axGjaAMzh0GWPuKllJlaCMd7pvzhw"
+    api_key = st.secrets["monday"]["api_key"]
     url = "https://api.monday.com/v2/"
     
     headers = {
