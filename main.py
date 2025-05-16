@@ -7,6 +7,8 @@ import os
 from monday_api import fetch_monday_updates
 import httpx
 import re
+import urllib3
+import json
 
 # Set page config
 st.set_page_config(
@@ -185,6 +187,81 @@ Sua função é gerar resumos claros e objetivos do status do lead, focando em i
         st.error(f"Erro ao gerar resumo do lead: {str(e)}")
         return None
 
+def generate_suggestion(messages):
+    """Gera uma sugestão de resposta baseada no histórico de mensagens."""
+    # Sort messages in ascending order (oldest first)
+    messages = messages.sort_values('created_at', ascending=True)
+    
+    # Get the last message from the client
+    last_client_message = messages[messages['message_direction'] == 'received'].iloc[-1]
+    
+    # Prepare the conversation text
+    conversation = []
+    for _, msg in messages.iterrows():
+        role = "Cliente" if msg['message_direction'] == 'received' else "Atendente"
+        content = msg['message_text'] or ''
+        
+        # Add file information if present
+        if 'file_url' in msg and pd.notna(msg['file_url']):
+            content += f"\n[Anexo: {msg.get('attachment_filename', 'Arquivo')}]({msg['file_url']})"
+        
+        # Add attachment URL if present
+        if 'attachment_url' in msg and pd.notna(msg['attachment_url']):
+            content += f"\n[Anexo: {msg.get('attachment_filename', 'Arquivo')}]({msg['attachment_url']})"
+        
+        # Add OCR information if present
+        if 'ocr_scan' in msg and pd.notna(msg['ocr_scan']):
+            content += f"\nOCR: {msg['ocr_scan']}"
+        
+        # Add audio transcription if present
+        if 'audio_transcription' in msg and pd.notna(msg['audio_transcription']):
+            content += f"\nTranscrição: {msg['audio_transcription']}"
+        
+        conversation.append(f"{role}: {content}")
+    
+    conversation_text = "\n".join(conversation)
+    
+    # Prepare the prompt for suggestion
+    prompt = f"""Analise o histórico de conversas e a última mensagem do cliente para gerar uma sugestão de resposta.
+
+Histórico de Conversas:
+{conversation_text}
+
+Última mensagem do cliente: {last_client_message['message_text']}
+
+Por favor, sugira uma resposta profissional e adequada."""
+    
+    # Call Grok API
+    url = "https://api.x.ai/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {st.secrets.grok.api_key}",
+        "Content-Type": "application/json"
+    }
+    
+    data = {
+        "model": "grok-3-latest",
+        "messages": [
+            {"role": "system", "content": """Você é um assistente especializado em sugestões de resposta para atendimento jurídico.
+Sua função é gerar sugestões de resposta profissionais e adequadas ao contexto.
+
+- Não adicione nenhum texto que não seria enviado para o cliente final.
+- Não assine as mensagens"""},
+            {"role": "user", "content": prompt}
+        ],
+        "temperature": 0.7,
+        "stream": False
+    }
+    
+    try:
+        with httpx.Client(verify=True, timeout=60.0) as client:
+            response = client.post(url, headers=headers, json=data)
+            response.raise_for_status()
+            result = response.json()
+            return result['choices'][0]['message']['content']
+    except Exception as e:
+        st.error(f"Erro ao gerar sugestão: {str(e)}")
+        return None
+
 # Cache the data loading function
 @st.cache_data(ttl=300)  # Cache for 5 minutes
 def load_data():
@@ -249,9 +326,22 @@ def show_lead_details(lead_data):
         st.markdown(f"**Link do Monday:** [Abrir no Monday]({lead_data['monday_link']})")
     
     st.markdown("---")
-    
+
+    # Load messages first to make them available for the suggestion feature
+    try:
+        phone = lead_data.get('phone')
+        if phone:
+            with st.spinner('Carregando mensagens...'):
+                messages_df = load_messages(phone)
+        else:
+            messages_df = pd.DataFrame()
+            st.warning("Número de telefone não disponível para este lead.")
+    except Exception as e:
+        messages_df = pd.DataFrame()
+        st.error(f"Erro ao carregar mensagens: {str(e)}")
+
     # Add lead summary section
-    st.markdown("### 📊 Resumo do Lead")
+    st.markdown("### Resumo do Lead")
     
     # Initialize lead summary in session state if not exists
     if 'lead_summary' not in st.session_state:
@@ -270,20 +360,41 @@ def show_lead_details(lead_data):
                 'email': lead_data.get('email', 'N/A')
             }
             
-            # Get messages for this lead
-            phone = lead_data.get('phone')
-            if phone:
-                messages_df = load_messages(phone)
-                if not messages_df.empty:
-                    st.session_state.lead_summary = generate_lead_status_summary(messages_df, monday_info)
+            if not messages_df.empty:
+                summary = generate_lead_status_summary(messages_df, monday_info)
+                if summary:
+                    st.session_state.lead_summary = summary
+                    
+                    # Deletar resumos antigos e enviar o novo
+                    with st.spinner("Atualizando no Monday..."):
+                        # Primeiro, deleta os resumos antigos
+                        success, result = delete_old_summaries(lead_data['id'])
+                        if success:
+                            st.info(result)
+                        else:
+                            st.warning(f"Não foi possível deletar resumos antigos: {result}")
+                        
+                        # Depois, envia o novo resumo
+                        update_text = f"{summary}\n\n---\nGerado com Rosenbaum AI"
+                        success, result = send_monday_update(lead_data['id'], update_text)
+                        if success:
+                            st.success("Resumo gerado e enviado para o Monday com sucesso!")
+                        else:
+                            st.error(f"Resumo gerado, mas houve um erro ao enviar para o Monday: {result}")
+                else:
+                    st.error("Não foi possível gerar o resumo do lead.")
+            else:
+                st.error("Não há mensagens disponíveis para gerar o resumo.")
     
     # Display lead summary if available
     if st.session_state.lead_summary:
-        with st.expander("📊 Resumo do Lead", expanded=True):
+        with st.expander("Resumo do Lead", expanded=True):
             st.markdown(st.session_state.lead_summary)
     else:
         st.info("Clique no botão acima para gerar o resumo do lead.")
-    
+
+    st.markdown("---")
+
     # Display Monday.com updates
     st.markdown("### Atualizações do Monday")
     
@@ -318,93 +429,386 @@ def show_lead_details(lead_data):
     except Exception as e:
         st.error(f"Erro ao carregar atualizações do Monday: {str(e)}")
 
+    st.markdown("---")
+
+    # Add WhatsApp message section
+    st.markdown("### Enviar Mensagem")
+    
+    # Add suggestion button
+    if st.button("Gerar Sugestão de Resposta", use_container_width=True):
+        with st.spinner("Gerando sugestão de resposta..."):
+            if not messages_df.empty:
+                suggestion = generate_suggestion(messages_df)
+                if suggestion:
+                    st.session_state.suggested_message = suggestion
+                    st.rerun()
+                else:
+                    st.error("Não foi possível gerar uma sugestão de resposta.")
+            else:
+                st.error("Não há mensagens disponíveis para gerar sugestão.")
+    
+    # Initialize message input with suggested message if available
+    message = st.text_area(
+        "Digite sua mensagem:", 
+        height=100,
+        value=st.session_state.get('suggested_message', '')
+    )
+    # Clear the suggested message after it's been used
+    if 'suggested_message' in st.session_state:
+        del st.session_state.suggested_message
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("Enviar Mensagem", use_container_width=True):
+            if message:
+                success, result = send_whatsapp_message(lead_data['phone'], message)
+                if success:
+                    st.success(result)
+                    # Add message to history
+                    st.session_state.messages_df = add_message_to_history(
+                        st.session_state.messages_df,
+                        "Rosenbaum Advogados",
+                        "+5511988094449",
+                        lead_data['name'],
+                        lead_data['phone'],
+                        message
+                    )
+                    st.rerun()
+                else:
+                    st.error(result)
+            else:
+                st.error("Por favor, digite uma mensagem para enviar.")
+    with col2:
+        if st.button("Enviar Mensagem (Modo Teste)", use_container_width=True):
+            if message:
+                success, result = send_whatsapp_message(lead_data['phone'], message, test_mode=True, test_phone="+5531992251502")
+                if success:
+                    st.success(result)
+                else:
+                    st.error(result)
+            else:
+                st.error("Por favor, digite uma mensagem para enviar.")
+
+    st.markdown("---")
+
     # Display WhatsApp messages
     st.markdown("### Histórico de Mensagens")
     
-    try:
-        # Extract phone number from lead data
-        phone = lead_data.get('phone')
-        if phone:
-            # Load messages with spinner
-            with st.spinner('Carregando mensagens...'):
-                messages_df = load_messages(phone)
+    if not messages_df.empty:
+        # Sort messages in descending order (newest first)
+        sorted_messages = messages_df.sort_values('created_at', ascending=False)
+        
+        # Calculate response times
+        response_times = calculate_response_time(sorted_messages)
+        
+        # Display messages
+        current_date = None
+        for idx, message in sorted_messages.iterrows():
+            # Check if date has changed
+            message_date = message['created_at'].strftime('%d/%m/%Y')
+            if current_date != message_date:
+                current_date = message_date
+                st.markdown(f"""
+                    <div style='
+                        text-align: center;
+                        margin: 1rem 0;
+                        padding: 0.5rem;
+                        background-color: #f0f2f6;
+                        border-radius: 0.5rem;
+                        color: #666;
+                        font-weight: 500;
+                    '>
+                        {current_date}
+                    </div>
+                """, unsafe_allow_html=True)
+            
+            # Determine message role
+            role = "user" if message['message_direction'] == 'received' else "assistant"
+            
+            # Clean message content
+            content = strip_html_tags(message['message_text'] or '')
+            
+            # Display message
+            with st.chat_message(role):
+                # Display timestamp
+                timestamp = message['created_at'].strftime('%H:%M')
+                st.caption(timestamp)
                 
-                if not messages_df.empty:
-                    # Sort messages in descending order (newest first)
-                    sorted_messages = messages_df.sort_values('created_at', ascending=False)
-                    
-                    # Calculate response times
-                    response_times = calculate_response_time(sorted_messages)
-                    
-                    # Display messages
-                    current_date = None
-                    for idx, message in sorted_messages.iterrows():
-                        # Check if date has changed
-                        message_date = message['created_at'].strftime('%d/%m/%Y')
-                        if current_date != message_date:
-                            current_date = message_date
-                            st.markdown(f"""
-                                <div style='
-                                    text-align: center;
-                                    margin: 1rem 0;
-                                    padding: 0.5rem;
-                                    background-color: #f0f2f6;
-                                    border-radius: 0.5rem;
-                                    color: #666;
-                                    font-weight: 500;
-                                '>
-                                    📅 {current_date}
-                                </div>
-                            """, unsafe_allow_html=True)
-                        
-                        # Determine message role
-                        role = "user" if message['message_direction'] == 'received' else "assistant"
-                        
-                        # Clean message content
-                        content = strip_html_tags(message['message_text'] or '')
-                        
-                        # Display message
-                        with st.chat_message(role):
-                            # Display timestamp
-                            timestamp = message['created_at'].strftime('%H:%M')
-                            st.caption(timestamp)
-                            
-                            # Display main message
-                            st.write(content)
-                            
-                            # Display file information if present
-                            if 'file_url' in message and pd.notna(message['file_url']):
-                                st.markdown(f"📎 [Abrir arquivo]({message['file_url']})")
-                            
-                            # Display attachment URL if present
-                            if 'attachment_url' in message and pd.notna(message['attachment_url']):
-                                st.markdown(f"📎 [Abrir anexo]({message['attachment_url']})")
-                            
-                            # Display OCR information if present
-                            if 'ocr_scan' in message and pd.notna(message['ocr_scan']):
-                                st.markdown(f"🔍 **OCR:** {message['ocr_scan']}")
-                            
-                            # Display attachment filename if present
-                            if 'attachment_filename' in message and pd.notna(message['attachment_filename']):
-                                st.markdown(f"📎 **Anexo:** {message['attachment_filename']}")
-                            
-                            # Display audio transcription if present
-                            if 'audio_transcription' in message and pd.notna(message['audio_transcription']):
-                                st.markdown(f"🎤 **Transcrição:** {message['audio_transcription']}")
-                            
-                            # Display response time if available
-                            if message['message_direction'] == 'received':
-                                if idx in response_times:
-                                    response_time = format_response_time(response_times[idx])
-                                    st.caption(f"⏱️ Tempo de resposta: {response_time}")
-                                else:
-                                    st.caption("⏱️ Aguardando resposta")
-                else:
-                    st.info("Nenhuma mensagem encontrada para este lead.")
+                # Display main message
+                st.write(content)
+                
+                # Display file information if present
+                if 'file_url' in message and pd.notna(message['file_url']):
+                    st.markdown(f"[Abrir arquivo]({message['file_url']})")
+                
+                # Display attachment URL if present
+                if 'attachment_url' in message and pd.notna(message['attachment_url']):
+                    st.markdown(f"[Abrir anexo]({message['attachment_url']})")
+                
+                # Display OCR information if present
+                if 'ocr_scan' in message and pd.notna(message['ocr_scan']):
+                    st.markdown(f"**OCR:** {message['ocr_scan']}")
+                
+                # Display attachment filename if present
+                if 'attachment_filename' in message and pd.notna(message['attachment_filename']):
+                    st.markdown(f"**Anexo:** {message['attachment_filename']}")
+                
+                # Display audio transcription if present
+                if 'audio_transcription' in message and pd.notna(message['audio_transcription']):
+                    st.markdown(f"**Transcrição:** {message['audio_transcription']}")
+                
+                # Display response time if available
+                if message['message_direction'] == 'received':
+                    if idx in response_times:
+                        response_time = format_response_time(response_times[idx])
+                        st.caption(f"Tempo de resposta: {response_time}")
+                    else:
+                        st.caption("Aguardando resposta")
+    else:
+        st.info("Nenhuma mensagem encontrada para este lead.")
+
+def send_whatsapp_message(phone, message, test_mode=False, test_phone=None):
+    """Envia mensagem via WhatsApp usando a API do Timelines."""
+    # Desabilitar avisos de SSL inseguro
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+    
+    # Configurações da API
+    url = "https://app.timelines.ai/integrations/api/messages"
+    headers = {
+        "accept": "application/json",
+        "Authorization": f"Bearer {st.secrets.timelines.api_key}",
+        "Content-Type": "application/json",
+        "X-CSRFToken": st.secrets.timelines.csrf_token
+    }
+    
+    # Dados da mensagem
+    data = {
+        "phone": test_phone if test_mode else phone,
+        "whatsapp_account_phone": "+5511988094449",
+        "text": message,
+        "label": "customer",
+        "chat_name": "Rosenbaum Chat"
+    }
+    
+    try:
+        # Criar um pool de conexões
+        http = urllib3.PoolManager(
+            timeout=urllib3.Timeout(connect=5.0, read=20.0),
+            retries=urllib3.Retry(3),
+            cert_reqs='CERT_NONE'  # Desabilitar verificação SSL
+        )
+        
+        # Tentar fazer a requisição
+        encoded_data = json.dumps(data).encode('utf-8')
+        response = http.request('POST', url, body=encoded_data, headers=headers)
+        
+        # Verificar o status da resposta
+        if response.status == 200:
+            mode_text = "modo teste" if test_mode else "cliente"
+            return True, f"Mensagem enviada com sucesso para {mode_text} ({data['phone']})!"
         else:
-            st.warning("Número de telefone não disponível para este lead.")
+            error_msg = f"Erro na API: Status {response.status}"
+            try:
+                error_data = json.loads(response.data.decode('utf-8'))
+                error_msg += f" - {error_data.get('message', 'Erro desconhecido')}"
+            except:
+                pass
+            return False, error_msg
+            
+    except urllib3.exceptions.MaxRetryError:
+        return False, "Erro: Número máximo de tentativas excedido. Verifique sua conexão com a internet."
+    except urllib3.exceptions.TimeoutError:
+        return False, "Erro: Tempo limite excedido. Verifique sua conexão com a internet."
+    except urllib3.exceptions.ProtocolError as e:
+        return False, f"Erro de protocolo: {str(e)}"
+    except urllib3.exceptions.HTTPError as e:
+        return False, f"Erro HTTP: {str(e)}"
     except Exception as e:
-        st.error(f"Erro ao carregar mensagens: {str(e)}")
+        return False, f"Erro inesperado: {str(e)}"
+
+def add_message_to_history(df, sender_name, sender_phone, recipient_name, recipient_phone, message_text, message_direction='sent'):
+    """Adiciona uma nova mensagem ao DataFrame de histórico."""
+    new_message = pd.DataFrame({
+        'created_at': [pd.Timestamp.now(tz='America/Sao_Paulo')],
+        'message_direction': [message_direction],
+        'sender_name': [sender_name],
+        'sender_phone': [sender_phone],
+        'recipient_name': [recipient_name],
+        'recipient_phone': [recipient_phone],
+        'message_text': [message_text],
+        'message_uid': [f"msg_{pd.Timestamp.now().timestamp()}"],
+        'account_name': ['Rosenbaum Chat']
+    })
+    return pd.concat([df, new_message], ignore_index=True)
+
+def send_monday_update(item_id, update_text):
+    """Envia um update para o Monday.com."""
+    url = "https://api.monday.com/v2"
+    headers = {
+        "Authorization": st.secrets.monday.api_key,
+        "Content-Type": "application/json",
+        "API-Version": "2023-10"
+    }
+    
+    # Primeiro, vamos verificar se o item existe
+    check_query = """
+    query ($itemId: ID!) {
+        items (ids: [$itemId]) {
+            id
+            name
+        }
+    }
+    """
+    
+    check_variables = {
+        "itemId": str(item_id)
+    }
+    
+    try:
+        # Verificar se o item existe
+        check_response = httpx.post(
+            url, 
+            json={"query": check_query, "variables": check_variables}, 
+            headers=headers
+        )
+        check_response.raise_for_status()
+        check_data = check_response.json()
+        
+        if "errors" in check_data:
+            return False, f"Erro ao verificar item: {check_data['errors']}"
+            
+        if not check_data.get("data", {}).get("items"):
+            return False, f"Item não encontrado no Monday: {item_id}"
+        
+        # Agora vamos criar o update
+        create_query = """
+        mutation ($itemId: ID!, $updateText: String!) {
+            create_update (item_id: $itemId, body: $updateText) {
+                id
+                body
+                created_at
+            }
+        }
+        """
+        
+        create_variables = {
+            "itemId": str(item_id),
+            "updateText": update_text
+        }
+        
+        create_payload = {
+            "query": create_query,
+            "variables": create_variables
+        }
+        
+        create_response = httpx.post(url, json=create_payload, headers=headers)
+        create_response.raise_for_status()
+        create_data = create_response.json()
+        
+        if "errors" in create_data:
+            return False, f"Erro ao criar update: {create_data['errors']}"
+            
+        if not create_data.get("data", {}).get("create_update"):
+            return False, "Update não foi criado"
+        
+        return True, "Update enviado com sucesso"
+    except httpx.HTTPError as e:
+        error_msg = f"Erro HTTP ao enviar update: {str(e)}"
+        if hasattr(e, 'response') and e.response is not None:
+            error_msg += f"\nResposta: {e.response.text}"
+        return False, error_msg
+    except Exception as e:
+        return False, f"Erro ao enviar update: {str(e)}"
+
+def get_monday_updates(item_id):
+    """Busca todos os updates de um item no Monday."""
+    url = "https://api.monday.com/v2"
+    headers = {
+        "Authorization": st.secrets.monday.api_key,
+        "Content-Type": "application/json",
+        "API-Version": "2023-10"
+    }
+    
+    query = """
+    query ($itemId: ID!) {
+        items (ids: [$itemId]) {
+            updates {
+                id
+                body
+                created_at
+            }
+        }
+    }
+    """
+    
+    variables = {
+        "itemId": str(item_id)
+    }
+    
+    try:
+        response = httpx.post(url, json={"query": query, "variables": variables}, headers=headers)
+        response.raise_for_status()
+        data = response.json()
+        
+        if "errors" in data:
+            return False, f"Erro ao buscar updates: {data['errors']}"
+            
+        if not data.get("data", {}).get("items"):
+            return False, f"Item não encontrado: {item_id}"
+            
+        updates = data["data"]["items"][0].get("updates", [])
+        return True, updates
+    except Exception as e:
+        return False, f"Erro ao buscar updates: {str(e)}"
+
+def delete_monday_update(update_id):
+    """Deleta um update específico no Monday."""
+    url = "https://api.monday.com/v2"
+    headers = {
+        "Authorization": st.secrets.monday.api_key,
+        "Content-Type": "application/json",
+        "API-Version": "2023-10"
+    }
+    
+    query = """
+    mutation ($updateId: ID!) {
+        delete_update (id: $updateId) {
+            id
+        }
+    }
+    """
+    
+    variables = {
+        "updateId": str(update_id)
+    }
+    
+    try:
+        response = httpx.post(url, json={"query": query, "variables": variables}, headers=headers)
+        response.raise_for_status()
+        data = response.json()
+        
+        if "errors" in data:
+            return False, f"Erro ao deletar update: {data['errors']}"
+            
+        return True, "Update deletado com sucesso"
+    except Exception as e:
+        return False, f"Erro ao deletar update: {str(e)}"
+
+def delete_old_summaries(item_id):
+    """Deleta todos os resumos antigos de um item."""
+    success, result = get_monday_updates(item_id)
+    if not success:
+        return False, result
+        
+    updates = result
+    deleted_count = 0
+    
+    for update in updates:
+        if "Gerado com Rosenbaum AI" in update.get("body", ""):
+            success, _ = delete_monday_update(update["id"])
+            if success:
+                deleted_count += 1
+    
+    return True, f"{deleted_count} resumos antigos deletados"
 
 try:
     # Initialize session state
