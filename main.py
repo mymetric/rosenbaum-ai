@@ -166,11 +166,14 @@ O resumo deve ser conciso e focado em informações relevantes para o acompanham
         "Content-Type": "application/json"
     }
     
+    # Use custom prompt from session state if available
+    system_prompt = st.session_state.get('summary_prompt', """Você é um assistente especializado em análise de leads jurídicos. 
+Sua função é gerar resumos claros e objetivos do status do lead, focando em informações relevantes para o acompanhamento do caso.""")
+    
     data = {
         "model": "grok-3-latest",
         "messages": [
-            {"role": "system", "content": """Você é um assistente especializado em análise de leads jurídicos. 
-Sua função é gerar resumos claros e objetivos do status do lead, focando em informações relevantes para o acompanhamento do caso."""},
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": prompt}
         ],
         "temperature": 0.7,
@@ -238,14 +241,17 @@ Por favor, sugira uma resposta profissional e adequada."""
         "Content-Type": "application/json"
     }
     
-    data = {
-        "model": "grok-3-latest",
-        "messages": [
-            {"role": "system", "content": """Você é um assistente especializado em sugestões de resposta para atendimento jurídico.
+    # Use custom prompt from session state if available
+    system_prompt = st.session_state.get('suggestion_prompt', """Você é um assistente especializado em sugestões de resposta para atendimento jurídico.
 Sua função é gerar sugestões de resposta profissionais e adequadas ao contexto.
 
 - Não adicione nenhum texto que não seria enviado para o cliente final.
-- Não assine as mensagens"""},
+- Não assine as mensagens""")
+    
+    data = {
+        "model": "grok-3-latest",
+        "messages": [
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": prompt}
         ],
         "temperature": 0.7,
@@ -347,55 +353,87 @@ def show_lead_details(lead_data):
     if 'lead_summary' not in st.session_state:
         st.session_state.lead_summary = None
     
-    # Create a container for the summary
-    summary_container = st.empty()
+    # Create tabs for summary and prompt editing
+    summary_tab, summary_prompt_tab = st.tabs(["📊 Resumo", "⚙️ Configurar Prompt"])
     
-    # Add button to generate summary
-    if st.button("Gerar Resumo do Lead", use_container_width=True):
-        with st.spinner("Gerando resumo do lead..."):
-            monday_info = {
-                'item_id': str(lead_data['id']),
-                'name': lead_data.get('title', 'N/A'),
-                'title': lead_data.get('title', 'N/A'),
-                'status': lead_data.get('status', 'N/A'),
-                'prioridade': lead_data.get('prioridade', 'N/A'),
-                'origem': lead_data.get('origem', 'N/A'),
-                'email': lead_data.get('email', 'N/A')
-            }
-            
-            if not messages_df.empty:
-                summary = generate_lead_status_summary(messages_df, monday_info)
-                if summary:
-                    st.session_state.lead_summary = summary
-                    
-                    # Deletar resumos antigos e enviar o novo
-                    with st.spinner("Atualizando no Monday..."):
-                        # Primeiro, deleta os resumos antigos
-                        success, result = delete_old_summaries(lead_data['id'])
-                        if success:
-                            st.info(result)
-                        else:
-                            st.warning(f"Não foi possível deletar resumos antigos: {result}")
+    with summary_tab:
+        # Create a container for the summary
+        summary_container = st.empty()
+        
+        # Add button to generate summary
+        if st.button("Gerar Resumo do Lead", use_container_width=True):
+            with st.spinner("Gerando resumo do lead..."):
+                monday_info = {
+                    'item_id': str(lead_data['id']),
+                    'name': lead_data.get('title', 'N/A'),
+                    'title': lead_data.get('title', 'N/A'),
+                    'status': lead_data.get('status', 'N/A'),
+                    'prioridade': lead_data.get('prioridade', 'N/A'),
+                    'origem': lead_data.get('origem', 'N/A'),
+                    'email': lead_data.get('email', 'N/A')
+                }
+                
+                if not messages_df.empty:
+                    summary = generate_lead_status_summary(messages_df, monday_info)
+                    if summary:
+                        st.session_state.lead_summary = summary
                         
-                        # Depois, envia o novo resumo
-                        update_text = f"{summary}\n\n---\nGerado com Rosenbaum AI"
-                        success, result = send_monday_update(lead_data['id'], update_text)
-                        if success:
-                            st.success("Resumo gerado e enviado para o Monday com sucesso!")
-                        else:
-                            st.error(f"Resumo gerado, mas houve um erro ao enviar para o Monday: {result}")
+                        # Deletar resumos antigos e enviar o novo
+                        with st.spinner("Atualizando no Monday..."):
+                            # Primeiro, deleta os resumos antigos
+                            success, result = delete_old_summaries(lead_data['id'])
+                            if success:
+                                st.info(result)
+                            else:
+                                st.warning(f"Não foi possível deletar resumos antigos: {result}")
+                            
+                            # Depois, envia o novo resumo
+                            update_text = f"{summary}\n\n---\nGerado com Rosenbaum AI"
+                            success, result = send_monday_update(lead_data['id'], update_text)
+                            if success:
+                                st.success("Resumo gerado e enviado para o Monday com sucesso!")
+                            else:
+                                st.error(f"Resumo gerado, mas houve um erro ao enviar para o Monday: {result}")
+                    else:
+                        st.error("Não foi possível gerar o resumo do lead.")
                 else:
-                    st.error("Não foi possível gerar o resumo do lead.")
-            else:
-                st.error("Não há mensagens disponíveis para gerar o resumo.")
+                    st.error("Não há mensagens disponíveis para gerar o resumo.")
+        
+        # Display lead summary if available
+        if st.session_state.lead_summary:
+            with summary_container.expander("Resumo do Lead", expanded=True):
+                st.markdown(st.session_state.lead_summary)
+        else:
+            with summary_container:
+                st.info("Clique no botão acima para gerar o resumo do lead.")
     
-    # Display lead summary if available
-    if st.session_state.lead_summary:
-        with summary_container.expander("Resumo do Lead", expanded=True):
-            st.markdown(st.session_state.lead_summary)
-    else:
-        with summary_container:
-            st.info("Clique no botão acima para gerar o resumo do lead.")
+    with summary_prompt_tab:
+        st.markdown("### Configurar Prompt de Resumo")
+        st.markdown("Personalize o prompt usado para gerar resumos do lead.")
+        
+        # Initialize prompt in session state if not exists
+        if 'summary_prompt' not in st.session_state:
+            st.session_state.summary_prompt = """Você é um assistente especializado em análise de leads jurídicos. 
+Sua função é gerar resumos claros e objetivos do status do lead, focando em informações relevantes para o acompanhamento do caso."""
+        
+        # Add prompt editor
+        prompt = st.text_area(
+            "Prompt de Resumo",
+            value=st.session_state.summary_prompt,
+            height=200,
+            help="Este prompt será usado para gerar resumos do lead. Use {conversation_text} para incluir o histórico de conversas e {monday_text} para incluir os dados do Monday."
+        )
+        
+        # Add save button
+        if st.button("💾 Salvar Prompt", use_container_width=True, key="save_summary_prompt"):
+            st.session_state.summary_prompt = prompt
+            st.success("✅ Prompt salvo com sucesso!")
+        
+        # Add reset button
+        if st.button("🔄 Restaurar Padrão", use_container_width=True, key="reset_summary_prompt"):
+            st.session_state.summary_prompt = """Você é um assistente especializado em análise de leads jurídicos. 
+Sua função é gerar resumos claros e objetivos do status do lead, focando em informações relevantes para o acompanhamento do caso."""
+            st.success("✅ Prompt restaurado para o valor padrão!")
 
     st.markdown("---")
 
@@ -438,58 +476,97 @@ def show_lead_details(lead_data):
     # Add WhatsApp message section
     st.markdown("### Enviar Mensagem")
     
-    # Add suggestion button
-    if st.button("Gerar Sugestão de Resposta", use_container_width=True):
-        with st.spinner("Gerando sugestão de resposta..."):
-            if not messages_df.empty:
-                suggestion = generate_suggestion(messages_df)
-                if suggestion:
-                    st.session_state.suggested_message = suggestion
-                else:
-                    st.error("Não foi possível gerar uma sugestão de resposta.")
-            else:
-                st.error("Não há mensagens disponíveis para gerar sugestão.")
+    # Create tabs for message input and prompt editing
+    message_tab, prompt_tab = st.tabs(["💬 Mensagem", "⚙️ Configurar Prompt"])
     
-    # Initialize message input with suggested message if available
-    message = st.text_area(
-        "Digite sua mensagem:", 
-        height=100,
-        value=st.session_state.get('suggested_message', '')
-    )
-    # Clear the suggested message after it's been used
-    if 'suggested_message' in st.session_state:
-        del st.session_state.suggested_message
-    col1, col2 = st.columns(2)
-    with col1:
-        if st.button("Enviar Mensagem", use_container_width=True):
-            if message:
-                success, result = send_whatsapp_message(lead_data['phone'], message)
-                if success:
-                    st.success(result)
-                    # Add message to history
-                    st.session_state.messages_df = add_message_to_history(
-                        st.session_state.messages_df,
-                        "Rosenbaum Advogados",
-                        "+5511988094449",
-                        lead_data['name'],
-                        lead_data['phone'],
-                        message
-                    )
-                    st.rerun()
+    with message_tab:
+        # Add suggestion button
+        if st.button("Gerar Sugestão de Resposta", use_container_width=True):
+            with st.spinner("Gerando sugestão de resposta..."):
+                if not messages_df.empty:
+                    suggestion = generate_suggestion(messages_df)
+                    if suggestion:
+                        st.session_state.suggested_message = suggestion
+                    else:
+                        st.error("Não foi possível gerar uma sugestão de resposta.")
                 else:
-                    st.error(result)
-            else:
-                st.error("Por favor, digite uma mensagem para enviar.")
-    with col2:
-        if st.button("Enviar Mensagem (Modo Teste)", use_container_width=True):
-            if message:
-                success, result = send_whatsapp_message(lead_data['phone'], message, test_mode=True, test_phone="+5531992251502")
-                if success:
-                    st.success(result)
+                    st.error("Não há mensagens disponíveis para gerar sugestão.")
+        
+        # Initialize message input with suggested message if available
+        message = st.text_area(
+            "Digite sua mensagem:", 
+            height=100,
+            value=st.session_state.get('suggested_message', '')
+        )
+        # Clear the suggested message after it's been used
+        if 'suggested_message' in st.session_state:
+            del st.session_state.suggested_message
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("Enviar Mensagem", use_container_width=True):
+                if message:
+                    success, result = send_whatsapp_message(lead_data['phone'], message)
+                    if success:
+                        st.success(result)
+                        # Add message to history
+                        st.session_state.messages_df = add_message_to_history(
+                            st.session_state.messages_df,
+                            "Rosenbaum Advogados",
+                            "+5511988094449",
+                            lead_data['name'],
+                            lead_data['phone'],
+                            message
+                        )
+                        st.rerun()
+                    else:
+                        st.error(result)
                 else:
-                    st.error(result)
-            else:
-                st.error("Por favor, digite uma mensagem para enviar.")
+                    st.error("Por favor, digite uma mensagem para enviar.")
+        with col2:
+            if st.button("Enviar Mensagem (Modo Teste)", use_container_width=True):
+                if message:
+                    success, result = send_whatsapp_message(lead_data['phone'], message, test_mode=True, test_phone="+5531992251502")
+                    if success:
+                        st.success(result)
+                    else:
+                        st.error(result)
+                else:
+                    st.error("Por favor, digite uma mensagem para enviar.")
+    
+    with prompt_tab:
+        st.markdown("### Configurar Prompt de Sugestão")
+        st.markdown("Personalize o prompt usado para gerar sugestões de resposta.")
+        
+        # Initialize prompt in session state if not exists
+        if 'suggestion_prompt' not in st.session_state:
+            st.session_state.suggestion_prompt = """Você é um assistente especializado em sugestões de resposta para atendimento jurídico.
+Sua função é gerar sugestões de resposta profissionais e adequadas ao contexto.
+
+- Não adicione nenhum texto que não seria enviado para o cliente final.
+- Não assine as mensagens"""
+        
+        # Add prompt editor
+        prompt = st.text_area(
+            "Prompt de Sugestão",
+            value=st.session_state.suggestion_prompt,
+            height=200,
+            help="Este prompt será usado para gerar sugestões de resposta. Use {conversation_text} para incluir o histórico de conversas e {last_client_message} para incluir a última mensagem do cliente."
+        )
+        
+        # Add save button
+        if st.button("💾 Salvar Prompt", use_container_width=True):
+            st.session_state.suggestion_prompt = prompt
+            st.success("✅ Prompt salvo com sucesso!")
+        
+        # Add reset button
+        if st.button("🔄 Restaurar Padrão", use_container_width=True):
+            st.session_state.suggestion_prompt = """Você é um assistente especializado em sugestões de resposta para atendimento jurídico.
+Sua função é gerar sugestões de resposta profissionais e adequadas ao contexto.
+
+- Não adicione nenhum texto que não seria enviado para o cliente final.
+- Não assine as mensagens"""
+            st.success("✅ Prompt restaurado para o valor padrão!")
 
     st.markdown("---")
 
