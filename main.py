@@ -347,6 +347,9 @@ def show_lead_details(lead_data):
     if 'lead_summary' not in st.session_state:
         st.session_state.lead_summary = None
     
+    # Create a container for the summary
+    summary_container = st.empty()
+    
     # Add button to generate summary
     if st.button("Gerar Resumo do Lead", use_container_width=True):
         with st.spinner("Gerando resumo do lead..."):
@@ -388,10 +391,11 @@ def show_lead_details(lead_data):
     
     # Display lead summary if available
     if st.session_state.lead_summary:
-        with st.expander("Resumo do Lead", expanded=True):
+        with summary_container.expander("Resumo do Lead", expanded=True):
             st.markdown(st.session_state.lead_summary)
     else:
-        st.info("Clique no botão acima para gerar o resumo do lead.")
+        with summary_container:
+            st.info("Clique no botão acima para gerar o resumo do lead.")
 
     st.markdown("---")
 
@@ -441,7 +445,6 @@ def show_lead_details(lead_data):
                 suggestion = generate_suggestion(messages_df)
                 if suggestion:
                     st.session_state.suggested_message = suggestion
-                    st.rerun()
                 else:
                     st.error("Não foi possível gerar uma sugestão de resposta.")
             else:
