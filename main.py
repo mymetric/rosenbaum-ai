@@ -280,19 +280,26 @@ def load_data():
     
     # Convert timestamps to São Paulo timezone
     for col in ['created_at', 'last_message']:
-        if df[col].dt.tz is None:
+        if col in df.columns and df[col].dt.tz is None:
             df[col] = pd.to_datetime(df[col]).dt.tz_localize('UTC')
-        df[col] = df[col].dt.tz_convert('America/Sao_Paulo')
+            df[col] = df[col].dt.tz_convert('America/Sao_Paulo')
+    
+    # Ensure email column exists and is string type
+    if 'email' not in df.columns:
+        df['email'] = ''
+    else:
+        df['email'] = df['email'].fillna('').astype(str)
     
     return df
 
 # Function to load messages
 @st.cache_data(ttl=300)  # Cache for 5 minutes
-def load_messages(phone):
+def load_messages(phone, email=None):
     query = read_sql_file(messages_sql_path)
     job_config = bigquery.QueryJobConfig(
         query_parameters=[
-            bigquery.ScalarQueryParameter("phone", "STRING", phone)
+            bigquery.ScalarQueryParameter("phone", "STRING", phone),
+            bigquery.ScalarQueryParameter("email", "STRING", email or "")
         ]
     )
     df = client.query(query, job_config=job_config).to_dataframe()
@@ -303,6 +310,12 @@ def load_messages(phone):
         if df['created_at'].dt.tz is None:
             df['created_at'] = df['created_at'].dt.tz_localize('UTC')
         df['created_at'] = df['created_at'].dt.tz_convert('America/Sao_Paulo')
+        
+        # Ensure all columns are present
+        required_columns = ['created_at', 'message_text', 'attachment_url', 'audio_transcription', 'ocr_scan', 'message_direction', 'attachment_filename']
+        for col in required_columns:
+            if col not in df.columns:
+                df[col] = None
     
     return df
 
@@ -340,12 +353,17 @@ def show_lead_details(lead_data):
     # Load messages first to make them available for the suggestion feature
     try:
         phone = lead_data.get('phone')
-        if phone:
+        email = lead_data.get('email')
+        if phone or email:
             with st.spinner('Carregando mensagens...'):
-                messages_df = load_messages(phone)
+                messages_df = load_messages(phone, email)
+                if messages_df.empty:
+                    st.warning("Nenhuma mensagem encontrada para este lead.")
+                else:
+                    st.success(f"Carregadas {len(messages_df)} mensagens.")
         else:
             messages_df = pd.DataFrame()
-            st.warning("Número de telefone não disponível para este lead.")
+            st.warning("Número de telefone e email não disponíveis para este lead.")
     except Exception as e:
         messages_df = pd.DataFrame()
         st.error(f"Erro ao carregar mensagens: {str(e)}")
@@ -905,8 +923,17 @@ try:
     
     # Load data with cache
     df = load_data()
-    
-    # If a lead is selected, show its details
+
+    # Ensure required columns exist
+    required_columns = ['id', 'created_at', 'board', 'title', 'phone', 'email', 'monday_link', 'last_message', 'message_count', 'ocr_count', 'audio_count']
+    missing_columns = [col for col in required_columns if col not in df.columns]
+
+    if missing_columns:
+        st.error(f"Colunas necessárias não encontradas no DataFrame: {missing_columns}")
+        st.write("Colunas disponíveis:", df.columns.tolist())
+        st.stop()
+
+    # Se um lead está selecionado, mostrar seus detalhes
     if st.session_state.show_lead and st.session_state.selected_lead:
         show_lead_details(st.session_state.selected_lead)
     else:
@@ -914,7 +941,7 @@ try:
         st.title("Rosenbaum CRM")
         
         # Create filters
-        col1, col2, col3, col4, col5 = st.columns(5)
+        col1, col2, col3, col4, col5, col6, col7 = st.columns(7)
         
         with col1:
             # Board filter
@@ -922,6 +949,14 @@ try:
             selected_board = st.selectbox('Quadro', boards)
         
         with col2:
+            # OCR filter
+            ocr_filter = st.selectbox('OCR', ['Todos', 'Com OCR', 'Sem OCR'])
+        
+        with col3:
+            # Audio filter
+            audio_filter = st.selectbox('Áudio', ['Todos', 'Com Áudio', 'Sem Áudio'])
+        
+        with col4:
             # Creation date range filter
             min_date = df['created_at'].min()
             max_date = df['created_at'].max()
@@ -932,7 +967,7 @@ try:
                 max_value=max_date
             )
         
-        with col3:
+        with col5:
             # Last message date range filter
             min_last_msg = df['last_message'].min()
             max_last_msg = df['last_message'].max()
@@ -943,11 +978,11 @@ try:
                 max_value=max_last_msg
             )
         
-        with col4:
+        with col6:
             # Title search
             search_title = st.text_input('Buscar por título', '')
         
-        with col5:
+        with col7:
             # Sort options
             sort_options = {
                 'Data de criação (mais recente)': 'created_at',
@@ -955,7 +990,11 @@ try:
                 'Última mensagem (mais recente)': 'last_message',
                 'Última mensagem (mais antiga)': 'last_message_asc',
                 'Quantidade de mensagens (maior)': 'message_count',
-                'Quantidade de mensagens (menor)': 'message_count_asc'
+                'Quantidade de mensagens (menor)': 'message_count_asc',
+                'Quantidade de OCR (maior)': 'ocr_count',
+                'Quantidade de OCR (menor)': 'ocr_count_asc',
+                'Quantidade de Áudio (maior)': 'audio_count',
+                'Quantidade de Áudio (menor)': 'audio_count_asc'
             }
             sort_by = st.selectbox('Ordenar por', list(sort_options.keys()))
         
@@ -970,6 +1009,18 @@ try:
         # Filter by board
         if selected_board != 'Todos':
             filtered_df = filtered_df[filtered_df['board'] == selected_board]
+        
+        # Filter by OCR
+        if ocr_filter == 'Com OCR':
+            filtered_df = filtered_df[filtered_df['ocr_count'] > 0]
+        elif ocr_filter == 'Sem OCR':
+            filtered_df = filtered_df[filtered_df['ocr_count'] == 0]
+        
+        # Filter by Audio
+        if audio_filter == 'Com Áudio':
+            filtered_df = filtered_df[filtered_df['audio_count'] > 0]
+        elif audio_filter == 'Sem Áudio':
+            filtered_df = filtered_df[filtered_df['audio_count'] == 0]
         
         # Filter by creation date range
         if len(creation_date_range) == 2:
@@ -1021,31 +1072,47 @@ try:
         # Display the data in a table with buttons
         with table_container:
             # Create header row
-            header_cols = st.columns([1, 2, 2, 3, 2, 1, 1])
+            header_cols = st.columns([1, 2, 2, 3, 2, 1, 1, 1, 1])
             header_cols[0].write("**ID**")
             header_cols[1].write("**Data de Criação**")
             header_cols[2].write("**Quadro**")
             header_cols[3].write("**Título**")
             header_cols[4].write("**Última Mensagem**")
             header_cols[5].write("**Mensagens**")
-            header_cols[6].write("**Ação**")
+            header_cols[6].write("**OCR**")
+            header_cols[7].write("**Áudio**")
+            header_cols[8].write("**Ação**")
             
             st.markdown("---")
             
             # Display data rows
             for _, row in current_page_items.iterrows():
-                cols = st.columns([1, 2, 2, 3, 2, 1, 1])
+                cols = st.columns([1, 2, 2, 3, 2, 1, 1, 1, 1])
                 cols[0].write(row['id'])
                 cols[1].write(row['created_at'])
                 cols[2].write(row['board'])
                 cols[3].write(row['title'])
                 cols[4].write(row['last_message'])
                 cols[5].write(f"📨 {row['message_count']}")
-                with cols[6]:
+                cols[6].write(f"📄 {row['ocr_count']}")
+                cols[7].write(f"🎤 {row['audio_count']}")
+                with cols[8]:
                     if st.button("Abrir", key=f"btn_{row['id']}"):
+                        lead_data = {
+                            'id': str(row['id']),
+                            'created_at': row['created_at'],
+                            'board': str(row['board']),
+                            'title': str(row['title']),
+                            'phone': str(row['phone']) if pd.notna(row['phone']) else None,
+                            'email': str(row['email']) if pd.notna(row['email']) else None,
+                            'monday_link': str(row['monday_link']) if pd.notna(row['monday_link']) else None,
+                            'last_message': row['last_message'],
+                            'message_count': int(row['message_count']),
+                            'ocr_count': int(row['ocr_count']),
+                            'audio_count': int(row['audio_count'])
+                        }
                         st.session_state.show_lead = True
-                        st.session_state.selected_lead = row.to_dict()
-                        # Clear lead summary when selecting a new lead
+                        st.session_state.selected_lead = lead_data
                         if 'lead_summary' in st.session_state:
                             del st.session_state.lead_summary
                         st.rerun()
