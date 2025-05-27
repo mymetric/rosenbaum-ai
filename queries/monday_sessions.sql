@@ -1,6 +1,7 @@
 with last_phone as (
     select
         chat_phone phone,
+        account_email email,
         max(created_at) last_message,
         count(*) message_count
     from `zapy-306602.gtms.messages`
@@ -17,5 +18,5 @@ SELECT
     b.last_message,
     b.message_count
 FROM `zapy-306602.dbt.monday_sessions` a
-left join last_phone b on a.phone = b.phone
+left join last_phone b on a.phone = b.phone or a.email = b.email
 ORDER BY created_at DESC 

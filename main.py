@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 from google.cloud import bigquery
+from google.oauth2 import service_account
 from datetime import datetime, timedelta
 import pytz
 import os
@@ -71,8 +72,11 @@ def format_response_time(timedelta):
         hours = (total_seconds % 86400) // 3600
         return f"{days}d {hours}h"
 
-# Initialize BigQuery client
-client = bigquery.Client()
+# Initialize BigQuery client with service account credentials
+credentials = service_account.Credentials.from_service_account_info(
+    st.secrets["gcp_service_account"]
+)
+client = bigquery.Client(credentials=credentials, project="zapy-306602")
 
 # Read SQL query from file
 def read_sql_file(file_path):
