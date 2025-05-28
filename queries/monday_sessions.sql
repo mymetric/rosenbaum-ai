@@ -1,7 +1,7 @@
 with last_phone as (
     select
         chat_phone phone,
-        account_email email,
+        max(account_email) email,
         max(created_at) last_message,
         count(*) message_count,
         count(case when ocr_scan is not null then 1 end) as ocr_count,
@@ -9,7 +9,7 @@ with last_phone as (
         count(case when channel = 'email' then 1 end) as email_count
     from `zapy-306602.gtms.messages`
     where chat_phone is not null or account_email is not null
-    group by chat_phone, account_email
+    group by chat_phone
 )
 
 SELECT
