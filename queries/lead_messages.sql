@@ -1,5 +1,6 @@
 SELECT
   created_at,
+  channel,
   message_text,
   file_url as attachment_url,
   audio_transcription,

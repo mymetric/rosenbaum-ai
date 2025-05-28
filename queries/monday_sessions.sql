@@ -5,7 +5,8 @@ with last_phone as (
         max(created_at) last_message,
         count(*) message_count,
         count(case when ocr_scan is not null then 1 end) as ocr_count,
-        count(case when audio_transcription is not null then 1 end) as audio_count
+        count(case when audio_transcription is not null then 1 end) as audio_count,
+        count(case when channel = 'email' then 1 end) as email_count
     from `zapy-306602.gtms.messages`
     where chat_phone is not null or account_email is not null
     group by chat_phone, account_email
@@ -22,7 +23,8 @@ SELECT
     b.last_message,
     b.message_count,
     COALESCE(b.ocr_count, 0) as ocr_count,
-    COALESCE(b.audio_count, 0) as audio_count
+    COALESCE(b.audio_count, 0) as audio_count,
+    COALESCE(b.email_count, 0) as email_count
 FROM `zapy-306602.dbt.monday_sessions` a
 left join last_phone b on (a.phone = b.phone or a.email = b.email)
 ORDER BY created_at DESC 

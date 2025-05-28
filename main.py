@@ -290,6 +290,10 @@ def load_data():
     else:
         df['email'] = df['email'].fillna('').astype(str)
     
+    # Add channel column based on email and phone
+    df['channel'] = 'whatsapp'  # default to whatsapp
+    df.loc[df['email'].str.len() > 0, 'channel'] = 'email'  # if email exists, set to email
+    
     return df
 
 # Function to load messages
@@ -348,6 +352,64 @@ def show_lead_details(lead_data):
         st.markdown(f"**Última Mensagem:** {lead_data['last_message']}")
         st.markdown(f"**Link do Monday:** [Abrir no Monday]({lead_data['monday_link']})")
     
+    st.markdown("---")
+
+    # Display statistics in a grid
+    st.markdown("### Estatísticas")
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        st.markdown(f"""
+            <div style='
+                background-color: #f0f2f6;
+                border-radius: 10px;
+                padding: 20px;
+                text-align: center;
+            '>
+                <div style='color: #666; font-size: 14px; margin-bottom: 5px;'>Total de Mensagens</div>
+                <div style='color: #262730; font-size: 32px; font-weight: bold;'>{lead_data['message_count']:,}</div>
+            </div>
+        """, unsafe_allow_html=True)
+    
+    with col2:
+        st.markdown(f"""
+            <div style='
+                background-color: #f0f2f6;
+                border-radius: 10px;
+                padding: 20px;
+                text-align: center;
+            '>
+                <div style='color: #666; font-size: 14px; margin-bottom: 5px;'>Documentos (OCR)</div>
+                <div style='color: #262730; font-size: 32px; font-weight: bold;'>{lead_data['ocr_count']:,}</div>
+            </div>
+        """, unsafe_allow_html=True)
+    
+    with col3:
+        st.markdown(f"""
+            <div style='
+                background-color: #f0f2f6;
+                border-radius: 10px;
+                padding: 20px;
+                text-align: center;
+            '>
+                <div style='color: #666; font-size: 14px; margin-bottom: 5px;'>Mensagens de Áudio</div>
+                <div style='color: #262730; font-size: 32px; font-weight: bold;'>{lead_data['audio_count']:,}</div>
+            </div>
+        """, unsafe_allow_html=True)
+    
+    with col4:
+        st.markdown(f"""
+            <div style='
+                background-color: #f0f2f6;
+                border-radius: 10px;
+                padding: 20px;
+                text-align: center;
+            '>
+                <div style='color: #666; font-size: 14px; margin-bottom: 5px;'>Emails</div>
+                <div style='color: #262730; font-size: 32px; font-weight: bold;'>{lead_data['email_count']:,}</div>
+            </div>
+        """, unsafe_allow_html=True)
+
     st.markdown("---")
 
     # Load messages first to make them available for the suggestion feature
@@ -635,8 +697,24 @@ Sua função é gerar sugestões de resposta profissionais e adequadas ao contex
                 timestamp = message['created_at'].strftime('%H:%M')
                 st.caption(timestamp)
                 
-                # Display main message
-                st.write(content)
+                # Check if message is an email using channel field
+                is_email = 'channel' in message and message['channel'] == 'email'
+                
+                # Display main message with email indicator if applicable
+                if is_email:
+                    st.markdown("""
+                        <div style='
+                            background-color: #e6f3ff;
+                            border-radius: 5px;
+                            padding: 10px;
+                            margin-bottom: 10px;
+                        '>
+                            <div style='font-size: 16px; margin-bottom: 5px;'>📧 <strong>Email</strong></div>
+                            <div style='font-size: 14px;'>{}</div>
+                        </div>
+                    """.format(content), unsafe_allow_html=True)
+                else:
+                    st.write(content)
                 
                 # Display file information if present
                 if 'file_url' in message and pd.notna(message['file_url']):
@@ -648,7 +726,17 @@ Sua função é gerar sugestões de resposta profissionais e adequadas ao contex
                 
                 # Display OCR information if present
                 if 'ocr_scan' in message and pd.notna(message['ocr_scan']):
-                    st.markdown(f"**OCR:** {message['ocr_scan']}")
+                    st.markdown("""
+                        <div style='
+                            background-color: #f0f2f6;
+                            border-radius: 5px;
+                            padding: 10px;
+                            margin: 5px 0;
+                        '>
+                            <div style='font-size: 16px; margin-bottom: 5px;'>📄 <strong>OCR</strong></div>
+                            <div style='font-size: 14px;'>{}</div>
+                        </div>
+                    """.format(message['ocr_scan']), unsafe_allow_html=True)
                 
                 # Display attachment filename if present
                 if 'attachment_filename' in message and pd.notna(message['attachment_filename']):
@@ -656,7 +744,17 @@ Sua função é gerar sugestões de resposta profissionais e adequadas ao contex
                 
                 # Display audio transcription if present
                 if 'audio_transcription' in message and pd.notna(message['audio_transcription']):
-                    st.markdown(f"**Transcrição:** {message['audio_transcription']}")
+                    st.markdown("""
+                        <div style='
+                            background-color: #f0f2f6;
+                            border-radius: 5px;
+                            padding: 10px;
+                            margin: 5px 0;
+                        '>
+                            <div style='font-size: 16px; margin-bottom: 5px;'>🎤 <strong>Transcrição de Áudio</strong></div>
+                            <div style='font-size: 14px;'>{}</div>
+                        </div>
+                    """.format(message['audio_transcription']), unsafe_allow_html=True)
                 
                 # Display response time if available
                 if message['message_direction'] == 'received':
@@ -940,23 +1038,92 @@ try:
         # Display title
         st.title("Rosenbaum CRM")
         
+        # Display metrics
+        total_leads = len(df)
+        leads_with_ocr = len(df[df['ocr_count'] > 0])
+        leads_with_email = len(df[df['email_count'] > 0])
+        leads_with_audio = len(df[df['audio_count'] > 0])
+
+        # Create a container for metrics with custom styling
+        st.markdown("""
+            <style>
+            .metric-container {
+                background-color: #f0f2f6;
+                border-radius: 10px;
+                padding: 20px;
+                margin-bottom: 20px;
+            }
+            .metric-title {
+                color: #666;
+                font-size: 14px;
+                margin-bottom: 5px;
+            }
+            .metric-value {
+                color: #262730;
+                font-size: 32px;
+                font-weight: bold;
+            }
+            </style>
+        """, unsafe_allow_html=True)
+
+        # Display metrics in a grid
+        col1, col2, col3, col4 = st.columns(4)
+
+        with col1:
+            st.markdown(f"""
+                <div class="metric-container">
+                    <div class="metric-title">Total de Leads</div>
+                    <div class="metric-value">{total_leads:,}</div>
+                </div>
+            """, unsafe_allow_html=True)
+
+        with col2:
+            st.markdown(f"""
+                <div class="metric-container">
+                    <div class="metric-title">Leads com OCR</div>
+                    <div class="metric-value">{leads_with_ocr:,}</div>
+                </div>
+            """, unsafe_allow_html=True)
+
+        with col3:
+            st.markdown(f"""
+                <div class="metric-container">
+                    <div class="metric-title">Leads com Email</div>
+                    <div class="metric-value">{leads_with_email:,}</div>
+                </div>
+            """, unsafe_allow_html=True)
+
+        with col4:
+            st.markdown(f"""
+                <div class="metric-container">
+                    <div class="metric-title">Leads com Áudio</div>
+                    <div class="metric-value">{leads_with_audio:,}</div>
+                </div>
+            """, unsafe_allow_html=True)
+
+        st.markdown("---")
+
         # Create filters
-        col1, col2, col3, col4, col5, col6, col7 = st.columns(7)
-        
+        col1, col2, col3, col4, col5, col6, col7, col8 = st.columns(8)
+
         with col1:
             # Board filter
             boards = ['Todos'] + sorted(df['board'].unique().tolist())
             selected_board = st.selectbox('Quadro', boards)
-        
+
         with col2:
+            # Email filter
+            email_filter = st.selectbox('Email', ['Todos', 'Com Email', 'Sem Email'])
+
+        with col3:
             # OCR filter
             ocr_filter = st.selectbox('OCR', ['Todos', 'Com OCR', 'Sem OCR'])
-        
-        with col3:
+
+        with col4:
             # Audio filter
             audio_filter = st.selectbox('Áudio', ['Todos', 'Com Áudio', 'Sem Áudio'])
         
-        with col4:
+        with col5:
             # Creation date range filter
             min_date = df['created_at'].min()
             max_date = df['created_at'].max()
@@ -967,7 +1134,7 @@ try:
                 max_value=max_date
             )
         
-        with col5:
+        with col6:
             # Last message date range filter
             min_last_msg = df['last_message'].min()
             max_last_msg = df['last_message'].max()
@@ -978,11 +1145,11 @@ try:
                 max_value=max_last_msg
             )
         
-        with col6:
+        with col7:
             # Title search
             search_title = st.text_input('Buscar por título', '')
         
-        with col7:
+        with col8:
             # Sort options
             sort_options = {
                 'Data de criação (mais recente)': 'created_at',
@@ -993,6 +1160,8 @@ try:
                 'Quantidade de mensagens (menor)': 'message_count_asc',
                 'Quantidade de OCR (maior)': 'ocr_count',
                 'Quantidade de OCR (menor)': 'ocr_count_asc',
+                'Quantidade de Email (maior)': 'email_count',
+                'Quantidade de Email (menor)': 'email_count_asc',
                 'Quantidade de Áudio (maior)': 'audio_count',
                 'Quantidade de Áudio (menor)': 'audio_count_asc'
             }
@@ -1009,6 +1178,12 @@ try:
         # Filter by board
         if selected_board != 'Todos':
             filtered_df = filtered_df[filtered_df['board'] == selected_board]
+        
+        # Filter by email
+        if email_filter == 'Com Email':
+            filtered_df = filtered_df[filtered_df['email_count'] > 0]
+        elif email_filter == 'Sem Email':
+            filtered_df = filtered_df[filtered_df['email_count'] == 0]
         
         # Filter by OCR
         if ocr_filter == 'Com OCR':
@@ -1049,7 +1224,7 @@ try:
             ascending = True
         else:
             ascending = False
-        
+
         filtered_df = filtered_df.sort_values(by=sort_field, ascending=ascending)
         
         # Format the created_at column for display
@@ -1072,7 +1247,7 @@ try:
         # Display the data in a table with buttons
         with table_container:
             # Create header row
-            header_cols = st.columns([1, 2, 2, 3, 2, 1, 1, 1, 1])
+            header_cols = st.columns([1, 2, 2, 3, 2, 1, 1, 1, 1, 1])
             header_cols[0].write("**ID**")
             header_cols[1].write("**Data de Criação**")
             header_cols[2].write("**Quadro**")
@@ -1081,13 +1256,14 @@ try:
             header_cols[5].write("**Mensagens**")
             header_cols[6].write("**OCR**")
             header_cols[7].write("**Áudio**")
-            header_cols[8].write("**Ação**")
+            header_cols[8].write("**Emails**")
+            header_cols[9].write("**Ação**")
             
             st.markdown("---")
             
             # Display data rows
             for _, row in current_page_items.iterrows():
-                cols = st.columns([1, 2, 2, 3, 2, 1, 1, 1, 1])
+                cols = st.columns([1, 2, 2, 3, 2, 1, 1, 1, 1, 1])
                 cols[0].write(row['id'])
                 cols[1].write(row['created_at'])
                 cols[2].write(row['board'])
@@ -1096,7 +1272,8 @@ try:
                 cols[5].write(f"📨 {row['message_count']}")
                 cols[6].write(f"📄 {row['ocr_count']}")
                 cols[7].write(f"🎤 {row['audio_count']}")
-                with cols[8]:
+                cols[8].write(f"📧 {row['email_count']}")
+                with cols[9]:
                     if st.button("Abrir", key=f"btn_{row['id']}"):
                         lead_data = {
                             'id': str(row['id']),
@@ -1109,7 +1286,8 @@ try:
                             'last_message': row['last_message'],
                             'message_count': int(row['message_count']),
                             'ocr_count': int(row['ocr_count']),
-                            'audio_count': int(row['audio_count'])
+                            'audio_count': int(row['audio_count']),
+                            'email_count': int(row['email_count'])
                         }
                         st.session_state.show_lead = True
                         st.session_state.selected_lead = lead_data
