@@ -334,6 +334,15 @@ def show_lead_details(lead_data):
             st.rerun()
     with col2:
         st.title(lead_data['title'])
+
+    # Botão de atualizar dados do lead (mover para logo após o título)
+    st.markdown("<div style='margin-bottom: 1rem;'></div>", unsafe_allow_html=True)
+    if st.button("🔄 Atualizar Dados do Lead", use_container_width=True, key="refresh_lead"):
+        st.cache_data.clear()
+        for key in ['lead_summary', 'messages_df']:
+            if key in st.session_state:
+                del st.session_state[key]
+        st.rerun()
     
     st.markdown("---")
     
@@ -561,89 +570,65 @@ Sua função é gerar resumos claros e objetivos do status do lead, focando em i
     st.markdown("### Enviar Mensagem")
     
     # Create tabs for message input and prompt editing
-    message_tab, prompt_tab = st.tabs(["💬 Mensagem", "⚙️ Configurar Prompt"])
+    message_tab, prompt_tab, document_prompt_tab = st.tabs(["💬 Mensagem", "⚙️ Configurar Prompt", "📄 Configurar Prompt de Documentos"])
     
     with message_tab:
-        # Add suggestion button
-        if st.button("Gerar Sugestão de Resposta", use_container_width=True):
-            with st.spinner("Gerando sugestão de resposta..."):
-                if not messages_df.empty:
-                    suggestion = generate_suggestion(messages_df)
-                    if suggestion:
-                        st.session_state.suggested_message = suggestion
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("Gerar Sugestão de Resposta", use_container_width=True):
+                with st.spinner("Gerando sugestão de resposta..."):
+                    if not messages_df.empty:
+                        suggestion = generate_suggestion(messages_df)
+                        if suggestion:
+                            st.session_state.suggested_message = suggestion
+                        else:
+                            st.error("Não foi possível gerar uma sugestão de resposta.")
                     else:
-                        st.error("Não foi possível gerar uma sugestão de resposta.")
-                else:
-                    st.error("Não há mensagens disponíveis para gerar sugestão.")
-        
-        # Initialize message input with suggested message if available
+                        st.error("Não há mensagens disponíveis para gerar sugestão.")
+        with col2:
+            if st.button("Gerar Lista de Documentos Faltantes", use_container_width=True):
+                with st.spinner("Gerando lista de documentos..."):
+                    if not messages_df.empty:
+                        # Use prompt customizado se existir
+                        documents_prompt = st.session_state.get('documents_prompt', """Você é um assistente especializado em análise de documentos jurídicos.
+Sua função é identificar quais documentos foram enviados e quais ainda faltam.""")
+                        checklist = generate_missing_documents(messages_df, documents_prompt)
+                        if checklist:
+                            st.session_state.documents_checklist = checklist
+                        else:
+                            st.error("Não foi possível gerar a lista de documentos.")
+                    else:
+                        st.error("Não há mensagens disponíveis para gerar a lista de documentos.")
+        # Campo de mensagem e exibição dos resultados
         message = st.text_area(
             "Digite sua mensagem:", 
             height=100,
             value=st.session_state.get('suggested_message', '')
         )
-        # Clear the suggested message after it's been used
         if 'suggested_message' in st.session_state:
             del st.session_state.suggested_message
-        
-        col1, col2 = st.columns(2)
-        with col1:
-            if st.button("Enviar Mensagem", use_container_width=True):
-                if message:
-                    success, result = send_whatsapp_message(lead_data['phone'], message)
-                    if success:
-                        st.success(result)
-                        # Add message to history
-                        st.session_state.messages_df = add_message_to_history(
-                            st.session_state.messages_df,
-                            "Rosenbaum Advogados",
-                            "+5511988094449",
-                            lead_data['name'],
-                            lead_data['phone'],
-                            message
-                        )
-                        st.rerun()
-                    else:
-                        st.error(result)
-                else:
-                    st.error("Por favor, digite uma mensagem para enviar.")
-        with col2:
-            if st.button("Enviar Mensagem (Modo Teste)", use_container_width=True):
-                if message:
-                    success, result = send_whatsapp_message(lead_data['phone'], message, test_mode=True, test_phone="+5531992251502")
-                    if success:
-                        st.success(result)
-                    else:
-                        st.error(result)
-                else:
-                    st.error("Por favor, digite uma mensagem para enviar.")
+        if 'documents_checklist' in st.session_state:
+            st.markdown("### Documentos Faltantes:")
+            st.markdown(st.session_state.documents_checklist)
     
     with prompt_tab:
         st.markdown("### Configurar Prompt de Sugestão")
         st.markdown("Personalize o prompt usado para gerar sugestões de resposta.")
-        
-        # Initialize prompt in session state if not exists
         if 'suggestion_prompt' not in st.session_state:
             st.session_state.suggestion_prompt = """Você é um assistente especializado em sugestões de resposta para atendimento jurídico.
 Sua função é gerar sugestões de resposta profissionais e adequadas ao contexto.
 
 - Não adicione nenhum texto que não seria enviado para o cliente final.
 - Não assine as mensagens"""
-        
-        # Add prompt editor
         prompt = st.text_area(
             "Prompt de Sugestão",
             value=st.session_state.suggestion_prompt,
             height=200,
             help="Este prompt será usado para gerar sugestões de resposta. Use {conversation_text} para incluir o histórico de conversas e {last_client_message} para incluir a última mensagem do cliente."
         )
-        
-        # Add save button
         if st.button("💾 Salvar Prompt", use_container_width=True):
             st.session_state.suggestion_prompt = prompt
             st.success("✅ Prompt salvo com sucesso!")
-        
-        # Add reset button
         if st.button("🔄 Restaurar Padrão", use_container_width=True):
             st.session_state.suggestion_prompt = """Você é um assistente especializado em sugestões de resposta para atendimento jurídico.
 Sua função é gerar sugestões de resposta profissionais e adequadas ao contexto.
@@ -651,6 +636,26 @@ Sua função é gerar sugestões de resposta profissionais e adequadas ao contex
 - Não adicione nenhum texto que não seria enviado para o cliente final.
 - Não assine as mensagens"""
             st.success("✅ Prompt restaurado para o valor padrão!")
+
+    with document_prompt_tab:
+        st.markdown("### Configurar Prompt de Documentos")
+        st.markdown("Personalize o prompt usado para gerar a lista de documentos faltantes.")
+        if 'documents_prompt' not in st.session_state:
+            st.session_state.documents_prompt = """Você é um assistente especializado em análise de documentos jurídicos.
+Sua função é identificar quais documentos foram enviados e quais ainda faltam."""
+        documents_prompt = st.text_area(
+            "Prompt de Documentos",
+            value=st.session_state.documents_prompt,
+            height=200,
+            help="Este prompt será usado para gerar a lista de documentos faltantes. Use {conversation_text} para incluir o histórico de conversas."
+        )
+        if st.button("💾 Salvar Prompt de Documentos", use_container_width=True):
+            st.session_state.documents_prompt = documents_prompt
+            st.success("✅ Prompt de documentos salvo com sucesso!")
+        if st.button("🔄 Restaurar Prompt de Documentos", use_container_width=True):
+            st.session_state.documents_prompt = """Você é um assistente especializado em análise de documentos jurídicos.
+Sua função é identificar quais documentos foram enviados e quais ainda faltam."""
+            st.success("✅ Prompt de documentos restaurado para o valor padrão!")
 
     st.markdown("---")
 
@@ -1038,6 +1043,14 @@ try:
         # Display title
         st.title("Rosenbaum CRM")
         
+        # Após o título principal, antes dos filtros:
+        if st.button("🔄 Atualizar Dados", use_container_width=True):
+            st.cache_data.clear()
+            for key in ['lead_summary', 'messages_df', 'selected_lead', 'show_lead', 'page']:
+                if key in st.session_state:
+                    del st.session_state[key]
+            st.rerun()
+        
         # Display metrics
         total_leads = len(df)
         leads_with_ocr = len(df[df['ocr_count'] > 0])
@@ -1197,20 +1210,28 @@ try:
         elif audio_filter == 'Sem Áudio':
             filtered_df = filtered_df[filtered_df['audio_count'] == 0]
         
+        # Antes dos filtros de data, garantir que as colunas estão em datetime (mesmo se já estiverem)
+        filtered_df['created_at'] = pd.to_datetime(filtered_df['created_at'], errors='coerce')
+        filtered_df['last_message'] = pd.to_datetime(filtered_df['last_message'], errors='coerce')
+
         # Filter by creation date range
         if len(creation_date_range) == 2:
             start_date, end_date = creation_date_range
+            start_date_dt = pd.to_datetime(start_date)
+            end_date_dt = pd.to_datetime(end_date)
             filtered_df = filtered_df[
-                (filtered_df['created_at'].dt.date >= start_date) &
-                (filtered_df['created_at'].dt.date <= end_date)
+                (filtered_df['created_at'].dt.date >= start_date_dt.date()) &
+                (filtered_df['created_at'].dt.date <= end_date_dt.date())
             ]
         
         # Filter by last message date range
         if len(last_msg_date_range) == 2:
             start_date, end_date = last_msg_date_range
+            start_date_dt = pd.to_datetime(start_date)
+            end_date_dt = pd.to_datetime(end_date)
             filtered_df = filtered_df[
-                (filtered_df['last_message'].dt.date >= start_date) &
-                (filtered_df['last_message'].dt.date <= end_date)
+                (filtered_df['last_message'].dt.date >= start_date_dt.date()) &
+                (filtered_df['last_message'].dt.date <= end_date_dt.date())
             ]
         
         # Filter by title search
@@ -1226,10 +1247,6 @@ try:
             ascending = False
 
         filtered_df = filtered_df.sort_values(by=sort_field, ascending=ascending)
-        
-        # Format the created_at column for display
-        filtered_df['created_at'] = filtered_df['created_at'].dt.strftime('%d/%m/%Y %H:%M')
-        filtered_df['last_message'] = filtered_df['last_message'].dt.strftime('%d/%m/%Y %H:%M')
         
         # Calculate items per page and total pages
         items_per_page = 20
@@ -1265,10 +1282,13 @@ try:
             for _, row in current_page_items.iterrows():
                 cols = st.columns([1, 2, 2, 3, 2, 1, 1, 1, 1, 1])
                 cols[0].write(row['id'])
-                cols[1].write(row['created_at'])
+                # Formatar datas apenas para exibição
+                created_at_str = row['created_at'].strftime('%d/%m/%Y %H:%M') if pd.notna(row['created_at']) else ''
+                last_message_str = row['last_message'].strftime('%d/%m/%Y %H:%M') if pd.notna(row['last_message']) else ''
+                cols[1].write(created_at_str)
                 cols[2].write(row['board'])
                 cols[3].write(row['title'])
-                cols[4].write(row['last_message'])
+                cols[4].write(last_message_str)
                 cols[5].write(f"📨 {row['message_count']}")
                 cols[6].write(f"📄 {row['ocr_count']}")
                 cols[7].write(f"🎤 {row['audio_count']}")
@@ -1277,13 +1297,13 @@ try:
                     if st.button("Abrir", key=f"btn_{row['id']}"):
                         lead_data = {
                             'id': str(row['id']),
-                            'created_at': row['created_at'],
+                            'created_at': created_at_str,
                             'board': str(row['board']),
                             'title': str(row['title']),
                             'phone': str(row['phone']) if pd.notna(row['phone']) else None,
                             'email': str(row['email']) if pd.notna(row['email']) else None,
                             'monday_link': str(row['monday_link']) if pd.notna(row['monday_link']) else None,
-                            'last_message': row['last_message'],
+                            'last_message': last_message_str,
                             'message_count': int(row['message_count']),
                             'ocr_count': int(row['ocr_count']),
                             'audio_count': int(row['audio_count']),
