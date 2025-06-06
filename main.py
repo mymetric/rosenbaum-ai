@@ -11,6 +11,37 @@ import re
 import urllib3
 import json
 
+# Funções para gerenciar prompts
+def load_prompts():
+    """Carrega os prompts do arquivo JSON."""
+    try:
+        if os.path.exists('prompts_config.json'):
+            with open('prompts_config.json', 'r', encoding='utf-8') as f:
+                return json.load(f)
+    except Exception as e:
+        st.error(f"Erro ao carregar prompts: {str(e)}")
+    return {
+        "summary_prompt": """Você é um assistente especializado em análise de leads jurídicos. 
+Sua função é gerar resumos claros e objetivos do status do lead, focando em informações relevantes para o acompanhamento do caso.""",
+        "suggestion_prompt": """Você é um assistente especializado em sugestões de resposta para atendimento jurídico.
+Sua função é gerar sugestões de resposta profissionais e adequadas ao contexto.
+
+- Não adicione nenhum texto que não seria enviado para o cliente final.
+- Não assine as mensagens""",
+        "documents_prompt": """Você é um assistente especializado em análise de documentos jurídicos.
+Sua função é identificar quais documentos foram enviados e quais ainda faltam."""
+    }
+
+def save_prompts(prompts):
+    """Salva os prompts em um arquivo JSON."""
+    try:
+        with open('prompts_config.json', 'w', encoding='utf-8') as f:
+            json.dump(prompts, f, ensure_ascii=False, indent=4)
+        return True
+    except Exception as e:
+        st.error(f"Erro ao salvar prompts: {str(e)}")
+        return False
+
 # Set page config
 st.set_page_config(
     page_title="Rosenbaum CRM",
@@ -566,6 +597,103 @@ Sua função é gerar resumos claros e objetivos do status do lead, focando em i
 
     st.markdown("---")
 
+    # Add Chat with AI section
+    st.markdown("### 💬 Chat com IA")
+    st.markdown("Faça perguntas sobre o lead e receba respostas da IA.")
+
+    # Initialize chat history in session state if not exists
+    if 'chat_history' not in st.session_state:
+        st.session_state.chat_history = []
+
+    # Display chat history
+    for message in st.session_state.chat_history:
+        with st.chat_message(message["role"]):
+            st.markdown(message["content"])
+
+    # Chat input
+    if prompt := st.chat_input("Digite sua pergunta sobre o lead..."):
+        # Add user message to chat history
+        st.session_state.chat_history.append({"role": "user", "content": prompt})
+        
+        # Display user message
+        with st.chat_message("user"):
+            st.markdown(prompt)
+        
+        # Prepare context for the AI
+        conversation_text = "\n".join([f"{msg['role']}: {msg['content']}" for msg in st.session_state.chat_history])
+        
+        # Prepare Monday info
+        monday_info = {
+            'item_id': str(lead_data['id']),
+            'name': lead_data.get('title', 'N/A'),
+            'title': lead_data.get('title', 'N/A'),
+            'status': lead_data.get('status', 'N/A'),
+            'prioridade': lead_data.get('prioridade', 'N/A'),
+            'origem': lead_data.get('origem', 'N/A'),
+            'email': lead_data.get('email', 'N/A')
+        }
+        
+        # Prepare the prompt for the AI
+        full_prompt = f"""Analise o histórico de conversas e os dados do lead para responder à pergunta do usuário.
+
+Histórico de Conversas:
+{conversation_text}
+
+Dados do Monday:
+- Nome: {monday_info['name']}
+- Título: {monday_info['title']}
+- Status: {monday_info['status']}
+- Prioridade: {monday_info['prioridade']}
+- Origem: {monday_info['origem']}
+- Email: {monday_info['email']}
+
+Pergunta do usuário: {prompt}
+
+Por favor, forneça uma resposta clara e objetiva baseada nas informações disponíveis."""
+        
+        # Call Grok API
+        url = "https://api.x.ai/v1/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {st.secrets.grok.api_key}",
+            "Content-Type": "application/json"
+        }
+        
+        data = {
+            "model": "grok-3-latest",
+            "messages": [
+                {"role": "system", "content": """Você é um assistente especializado em análise de leads jurídicos.
+Sua função é ajudar a entender melhor o contexto do lead e fornecer insights relevantes.
+Seja claro, objetivo e profissional em suas respostas."""},
+                {"role": "user", "content": full_prompt}
+            ],
+            "temperature": 0.7,
+            "stream": False
+        }
+        
+        try:
+            with st.spinner("Pensando..."):
+                with httpx.Client(verify=True, timeout=60.0) as client:
+                    response = client.post(url, headers=headers, json=data)
+                    response.raise_for_status()
+                    result = response.json()
+                    ai_response = result['choices'][0]['message']['content']
+                    
+                    # Add AI response to chat history
+                    st.session_state.chat_history.append({"role": "assistant", "content": ai_response})
+                    
+                    # Display AI response
+                    with st.chat_message("assistant"):
+                        st.markdown(ai_response)
+        except Exception as e:
+            st.error(f"Erro ao gerar resposta: {str(e)}")
+
+    # Add clear chat button
+    if st.button("🗑️ Limpar Chat", use_container_width=True, key="clear_chat_button"):
+        st.session_state.chat_history = []
+        st.rerun()
+
+    st.markdown("---")
+
     # Add WhatsApp message section
     st.markdown("### Enviar Mensagem")
     
@@ -575,7 +703,7 @@ Sua função é gerar resumos claros e objetivos do status do lead, focando em i
     with message_tab:
         col1, col2 = st.columns(2)
         with col1:
-            if st.button("Gerar Sugestão de Resposta", use_container_width=True):
+            if st.button("Gerar Sugestão de Resposta", use_container_width=True, key="generate_suggestion_button"):
                 with st.spinner("Gerando sugestão de resposta..."):
                     if not messages_df.empty:
                         suggestion = generate_suggestion(messages_df)
@@ -586,7 +714,7 @@ Sua função é gerar resumos claros e objetivos do status do lead, focando em i
                     else:
                         st.error("Não há mensagens disponíveis para gerar sugestão.")
         with col2:
-            if st.button("Gerar Lista de Documentos Faltantes", use_container_width=True):
+            if st.button("Gerar Lista de Documentos Faltantes", use_container_width=True, key="generate_documents_button"):
                 with st.spinner("Gerando lista de documentos..."):
                     if not messages_df.empty:
                         # Use prompt customizado se existir
@@ -610,7 +738,45 @@ Sua função é identificar quais documentos foram enviados e quais ainda faltam
         if 'documents_checklist' in st.session_state:
             st.markdown("### Documentos Faltantes:")
             st.markdown(st.session_state.documents_checklist)
-    
+        
+        # Botão de enviar mensagem
+        if st.button("📤 Enviar Mensagem", use_container_width=True, key="send_message_button"):
+            if not message:
+                st.error("Por favor, digite uma mensagem para enviar.")
+            else:
+                phone = lead_data.get('phone')
+                if not phone:
+                    st.error("Número de telefone não disponível para este lead.")
+                else:
+                    with st.spinner("Enviando mensagem..."):
+                        success, result = send_whatsapp_message(phone, message)
+                        if success:
+                            st.success(result)
+                            # Adicionar mensagem ao histórico
+                            messages_df = add_message_to_history(
+                                messages_df,
+                                "Atendente",
+                                "+5511988094449",
+                                "Cliente",
+                                phone,
+                                message
+                            )
+                        else:
+                            st.error(result)
+        
+        # Botão de enviar mensagem de teste
+        if st.button("🧪 Enviar Mensagem de Teste", use_container_width=True, key="send_test_message_button"):
+            if not message:
+                st.error("Por favor, digite uma mensagem para enviar.")
+            else:
+                test_phone = "31992251502"
+                with st.spinner("Enviando mensagem de teste..."):
+                    success, result = send_whatsapp_message(test_phone, message, test_mode=True, test_phone=test_phone)
+                    if success:
+                        st.success(result)
+                    else:
+                        st.error(result)
+
     with prompt_tab:
         st.markdown("### Configurar Prompt de Sugestão")
         st.markdown("Personalize o prompt usado para gerar sugestões de resposta.")
@@ -626,16 +792,32 @@ Sua função é gerar sugestões de resposta profissionais e adequadas ao contex
             height=200,
             help="Este prompt será usado para gerar sugestões de resposta. Use {conversation_text} para incluir o histórico de conversas e {last_client_message} para incluir a última mensagem do cliente."
         )
-        if st.button("💾 Salvar Prompt", use_container_width=True):
+        if st.button("💾 Salvar Prompt", use_container_width=True, key="save_suggestion_prompt_button"):
             st.session_state.suggestion_prompt = prompt
-            st.success("✅ Prompt salvo com sucesso!")
-        if st.button("🔄 Restaurar Padrão", use_container_width=True):
+            prompts = {
+                "summary_prompt": st.session_state.summary_prompt,
+                "suggestion_prompt": st.session_state.suggestion_prompt,
+                "documents_prompt": st.session_state.documents_prompt
+            }
+            if save_prompts(prompts):
+                st.success("✅ Prompt salvo com sucesso!")
+            else:
+                st.error("❌ Erro ao salvar prompt!")
+        if st.button("🔄 Restaurar Padrão", use_container_width=True, key="reset_suggestion_prompt_button"):
             st.session_state.suggestion_prompt = """Você é um assistente especializado em sugestões de resposta para atendimento jurídico.
 Sua função é gerar sugestões de resposta profissionais e adequadas ao contexto.
 
 - Não adicione nenhum texto que não seria enviado para o cliente final.
 - Não assine as mensagens"""
-            st.success("✅ Prompt restaurado para o valor padrão!")
+            prompts = {
+                "summary_prompt": st.session_state.summary_prompt,
+                "suggestion_prompt": st.session_state.suggestion_prompt,
+                "documents_prompt": st.session_state.documents_prompt
+            }
+            if save_prompts(prompts):
+                st.success("✅ Prompt restaurado para o valor padrão!")
+            else:
+                st.error("❌ Erro ao salvar prompt!")
 
     with document_prompt_tab:
         st.markdown("### Configurar Prompt de Documentos")
@@ -649,13 +831,29 @@ Sua função é identificar quais documentos foram enviados e quais ainda faltam
             height=200,
             help="Este prompt será usado para gerar a lista de documentos faltantes. Use {conversation_text} para incluir o histórico de conversas."
         )
-        if st.button("💾 Salvar Prompt de Documentos", use_container_width=True):
+        if st.button("💾 Salvar Prompt de Documentos", use_container_width=True, key="save_documents_prompt_button"):
             st.session_state.documents_prompt = documents_prompt
-            st.success("✅ Prompt de documentos salvo com sucesso!")
-        if st.button("🔄 Restaurar Prompt de Documentos", use_container_width=True):
+            prompts = {
+                "summary_prompt": st.session_state.summary_prompt,
+                "suggestion_prompt": st.session_state.suggestion_prompt,
+                "documents_prompt": st.session_state.documents_prompt
+            }
+            if save_prompts(prompts):
+                st.success("✅ Prompt de documentos salvo com sucesso!")
+            else:
+                st.error("❌ Erro ao salvar prompt!")
+        if st.button("🔄 Restaurar Prompt de Documentos", use_container_width=True, key="reset_documents_prompt_button"):
             st.session_state.documents_prompt = """Você é um assistente especializado em análise de documentos jurídicos.
 Sua função é identificar quais documentos foram enviados e quais ainda faltam."""
-            st.success("✅ Prompt de documentos restaurado para o valor padrão!")
+            prompts = {
+                "summary_prompt": st.session_state.summary_prompt,
+                "suggestion_prompt": st.session_state.suggestion_prompt,
+                "documents_prompt": st.session_state.documents_prompt
+            }
+            if save_prompts(prompts):
+                st.success("✅ Prompt de documentos restaurado para o valor padrão!")
+            else:
+                st.error("❌ Erro ao salvar prompt!")
 
     st.markdown("---")
 
@@ -781,8 +979,7 @@ def send_whatsapp_message(phone, message, test_mode=False, test_phone=None):
     headers = {
         "accept": "application/json",
         "Authorization": f"Bearer {st.secrets.timelines.api_key}",
-        "Content-Type": "application/json",
-        "X-CSRFToken": st.secrets.timelines.csrf_token
+        "Content-Type": "application/json"
     }
     
     # Dados da mensagem
@@ -1024,6 +1221,14 @@ try:
     if 'page' not in st.session_state:
         st.session_state.page = 0
     
+    # Carregar prompts do arquivo
+    if 'prompts_loaded' not in st.session_state:
+        prompts = load_prompts()
+        st.session_state.summary_prompt = prompts['summary_prompt']
+        st.session_state.suggestion_prompt = prompts['suggestion_prompt']
+        st.session_state.documents_prompt = prompts['documents_prompt']
+        st.session_state.prompts_loaded = True
+
     # Load data with cache
     df = load_data()
 
