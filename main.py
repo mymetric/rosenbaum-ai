@@ -309,11 +309,12 @@ def load_data():
     query = read_sql_file(sql_file_path)
     df = client.query(query).to_dataframe()
     
-    # Convert timestamps to São Paulo timezone
-    for col in ['created_at', 'last_message']:
-        if col in df.columns and df[col].dt.tz is None:
-            df[col] = pd.to_datetime(df[col]).dt.tz_localize('UTC')
-            df[col] = df[col].dt.tz_convert('America/Sao_Paulo')
+    # Convert last_message to São Paulo timezone (it comes in UTC)
+    if 'last_message' in df.columns:
+        df['last_message'] = pd.to_datetime(df['last_message'])
+        if df['last_message'].dt.tz is None:
+            df['last_message'] = df['last_message'].dt.tz_localize('UTC')
+        df['last_message'] = df['last_message'].dt.tz_convert('America/Sao_Paulo')
     
     # Ensure email column exists and is string type
     if 'email' not in df.columns:
@@ -1383,7 +1384,7 @@ try:
                 'Quantidade de Áudio (maior)': 'audio_count',
                 'Quantidade de Áudio (menor)': 'audio_count_asc'
             }
-            sort_by = st.selectbox('Ordenar por', list(sort_options.keys()))
+            sort_by = st.selectbox('Ordenar por', list(sort_options.keys()), index=2)
         
         # Add spacing between filters and table
         st.markdown("---")
