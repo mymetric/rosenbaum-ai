@@ -541,6 +541,94 @@ def show_lead_details(lead_data):
     # Create tabs for different sections
     tab1, tab2, tab3, tab4, tab5 = st.tabs(["📊 Resumo do Lead", "💬 Histórico de Conversa", "📄 Documentos Faltantes", "📝 Updates no Monday", "🤖 Chat com IA"])
 
+    # Tab 1: Resumo do Lead
+    with tab1:
+        # Initialize lead summary in session state if not exists
+        if 'lead_summary' not in st.session_state:
+            st.session_state.lead_summary = None
+        
+        # Create tabs for summary and prompt editing
+        summary_tab, summary_prompt_tab = st.tabs(["📊 Resumo", "⚙️ Configurar Prompt"])
+        
+        with summary_tab:
+            # Create a container for the summary
+            summary_container = st.empty()
+            
+            # Add button to generate summary
+            if st.button("Gerar Resumo do Lead", use_container_width=True):
+                with st.spinner("Gerando resumo do lead..."):
+                    monday_info = {
+                        'item_id': str(lead_data['id']),
+                        'name': lead_data.get('title', 'N/A'),
+                        'title': lead_data.get('title', 'N/A'),
+                        'status': lead_data.get('status', 'N/A'),
+                        'prioridade': lead_data.get('prioridade', 'N/A'),
+                        'origem': lead_data.get('origem', 'N/A'),
+                        'email': lead_data.get('email', 'N/A')
+                    }
+                    
+                    if not messages_df.empty:
+                        summary = generate_lead_status_summary(messages_df, monday_info)
+                        if summary:
+                            st.session_state.lead_summary = summary
+                            
+                            # Deletar resumos antigos e enviar o novo
+                            with st.spinner("Atualizando no Monday..."):
+                                # Primeiro, deleta os resumos antigos
+                                success, result = delete_old_summaries(lead_data['id'])
+                                if success:
+                                    st.info(result)
+                                else:
+                                    st.warning(f"Não foi possível deletar resumos antigos: {result}")
+                                
+                                # Depois, envia o novo resumo
+                                update_text = f"{summary}\n\n---\nGerado com Rosenbaum AI"
+                                success, result = send_monday_update(lead_data['id'], update_text)
+                                if success:
+                                    st.success("Resumo gerado e enviado para o Monday com sucesso!")
+                                else:
+                                    st.error(f"Resumo gerado, mas houve um erro ao enviar para o Monday: {result}")
+                        else:
+                            st.error("Não foi possível gerar o resumo do lead.")
+                    else:
+                        st.error("Não há mensagens disponíveis para gerar o resumo.")
+            
+            # Display lead summary if available
+            if st.session_state.lead_summary:
+                with summary_container.expander("Resumo do Lead", expanded=True):
+                    st.markdown(st.session_state.lead_summary)
+            else:
+                with summary_container:
+                    st.info("Clique no botão acima para gerar o resumo do lead.")
+        
+        with summary_prompt_tab:
+            st.markdown("### Configurar Prompt de Resumo")
+            st.markdown("Personalize o prompt usado para gerar resumos do lead.")
+            
+            # Initialize prompt in session state if not exists
+            if 'summary_prompt' not in st.session_state:
+                st.session_state.summary_prompt = """Você é um assistente especializado em análise de leads jurídicos. 
+Sua função é gerar resumos claros e objetivos do status do lead, focando em informações relevantes para o acompanhamento do caso."""
+            
+            # Add prompt editor
+            prompt = st.text_area(
+                "Prompt de Resumo",
+                value=st.session_state.summary_prompt,
+                height=200,
+                help="Este prompt será usado para gerar resumos do lead. Use {conversation_text} para incluir o histórico de conversas e {monday_text} para incluir os dados do Monday."
+            )
+            
+            # Add save button
+            if st.button("💾 Salvar Prompt", use_container_width=True, key="save_summary_prompt"):
+                st.session_state.summary_prompt = prompt
+                st.success("✅ Prompt salvo com sucesso!")
+            
+            # Add reset button
+            if st.button("🔄 Restaurar Padrão", use_container_width=True, key="reset_summary_prompt"):
+                st.session_state.summary_prompt = """Você é um assistente especializado em análise de leads jurídicos. 
+Sua função é gerar resumos claros e objetivos do status do lead, focando em informações relevantes para o acompanhamento do caso."""
+                st.success("✅ Prompt restaurado para o valor padrão!")
+
     # Tab 2: Histórico de Conversa
     with tab2:
         # Add WhatsApp message section first
