@@ -303,6 +303,82 @@ Sua função é gerar sugestões de resposta profissionais e adequadas ao contex
         st.error(f"Erro ao gerar sugestão: {str(e)}")
         return None
 
+def generate_missing_documents(messages, system_prompt=None):
+    """Gera uma lista de documentos enviados e faltantes baseada no histórico de mensagens."""
+    # Sort messages in ascending order (oldest first)
+    messages = messages.sort_values('created_at', ascending=True)
+    
+    # Prepare the conversation text
+    conversation = []
+    for _, msg in messages.iterrows():
+        role = "Cliente" if msg['message_direction'] == 'received' else "Atendente"
+        content = msg['message_text'] or ''
+        
+        # Add file information if present
+        if 'file_url' in msg and pd.notna(msg['file_url']):
+            content += f"\n[Anexo: {msg.get('attachment_filename', 'Arquivo')}]({msg['file_url']})"
+        
+        # Add attachment URL if present
+        if 'attachment_url' in msg and pd.notna(msg['attachment_url']):
+            content += f"\n[Anexo: {msg.get('attachment_filename', 'Arquivo')}]({msg['attachment_url']})"
+        
+        # Add OCR information if present
+        if 'ocr_scan' in msg and pd.notna(msg['ocr_scan']):
+            content += f"\nOCR: {msg['ocr_scan']}"
+        
+        # Add audio transcription if present
+        if 'audio_transcription' in msg and pd.notna(msg['audio_transcription']):
+            content += f"\nTranscrição: {msg['audio_transcription']}"
+        
+        conversation.append(f"{role}: {content}")
+    
+    conversation_text = "\n".join(conversation)
+    
+    # Prepare the prompt for document analysis
+    prompt = f"""Analise o histórico de conversas e identifique quais documentos foram enviados e quais ainda faltam.
+
+Histórico de Conversas:
+{conversation_text}
+
+Por favor, forneça uma lista organizada com:
+1. Documentos já enviados
+2. Documentos que ainda faltam
+3. Observações importantes sobre os documentos
+
+Formate a resposta em markdown para melhor visualização."""
+    
+    # Call Grok API
+    url = "https://api.x.ai/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {st.secrets.grok.api_key}",
+        "Content-Type": "application/json"
+    }
+    
+    # Use custom prompt from session state if available
+    if system_prompt is None:
+        system_prompt = st.session_state.get('documents_prompt', """Você é um assistente especializado em análise de documentos jurídicos.
+Sua função é identificar quais documentos foram enviados e quais ainda faltam.""")
+    
+    data = {
+        "model": "grok-3-latest",
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": prompt}
+        ],
+        "temperature": 0.7,
+        "stream": False
+    }
+    
+    try:
+        with httpx.Client(verify=True, timeout=60.0) as client:
+            response = client.post(url, headers=headers, json=data)
+            response.raise_for_status()
+            result = response.json()
+            return result['choices'][0]['message']['content']
+    except Exception as e:
+        st.error(f"Erro ao gerar lista de documentos: {str(e)}")
+        return None
+
 # Cache the data loading function
 @st.cache_data(ttl=300)  # Cache for 5 minutes
 def load_data():
@@ -367,17 +443,8 @@ def show_lead_details(lead_data):
     with col2:
         st.title(lead_data['title'])
 
-    # Botão de atualizar dados do lead (mover para logo após o título)
-    st.markdown("<div style='margin-bottom: 1rem;'></div>", unsafe_allow_html=True)
-    if st.button("🔄 Atualizar Dados do Lead", use_container_width=True, key="refresh_lead"):
-        st.cache_data.clear()
-        for key in ['lead_summary', 'messages_df']:
-            if key in st.session_state:
-                del st.session_state[key]
-        st.rerun()
-    
     st.markdown("---")
-    
+
     # Display lead information in a structured way
     col1, col2 = st.columns(2)
     
@@ -471,108 +538,310 @@ def show_lead_details(lead_data):
         messages_df = pd.DataFrame()
         st.error(f"Erro ao carregar mensagens: {str(e)}")
 
-    # Add lead summary section
-    st.markdown("### Resumo do Lead")
-    
-    # Initialize lead summary in session state if not exists
-    if 'lead_summary' not in st.session_state:
-        st.session_state.lead_summary = None
-    
-    # Create tabs for summary and prompt editing
-    summary_tab, summary_prompt_tab = st.tabs(["📊 Resumo", "⚙️ Configurar Prompt"])
-    
-    with summary_tab:
-        # Create a container for the summary
-        summary_container = st.empty()
+    # Create tabs for different sections
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(["📊 Resumo do Lead", "💬 Histórico de Conversa", "📄 Documentos Faltantes", "📝 Updates no Monday", "🤖 Chat com IA"])
+
+    # Tab 2: Histórico de Conversa
+    with tab2:
+        # Add WhatsApp message section first
+        st.markdown("### Enviar Mensagem")
         
-        # Add button to generate summary
-        if st.button("Gerar Resumo do Lead", use_container_width=True):
-            with st.spinner("Gerando resumo do lead..."):
-                monday_info = {
-                    'item_id': str(lead_data['id']),
-                    'name': lead_data.get('title', 'N/A'),
-                    'title': lead_data.get('title', 'N/A'),
-                    'status': lead_data.get('status', 'N/A'),
-                    'prioridade': lead_data.get('prioridade', 'N/A'),
-                    'origem': lead_data.get('origem', 'N/A'),
-                    'email': lead_data.get('email', 'N/A')
-                }
-                
-                if not messages_df.empty:
-                    summary = generate_lead_status_summary(messages_df, monday_info)
-                    if summary:
-                        st.session_state.lead_summary = summary
-                        
-                        # Deletar resumos antigos e enviar o novo
-                        with st.spinner("Atualizando no Monday..."):
-                            # Primeiro, deleta os resumos antigos
-                            success, result = delete_old_summaries(lead_data['id'])
-                            if success:
-                                st.info(result)
-                            else:
-                                st.warning(f"Não foi possível deletar resumos antigos: {result}")
-                            
-                            # Depois, envia o novo resumo
-                            update_text = f"{summary}\n\n---\nGerado com Rosenbaum AI"
-                            success, result = send_monday_update(lead_data['id'], update_text)
-                            if success:
-                                st.success("Resumo gerado e enviado para o Monday com sucesso!")
-                            else:
-                                st.error(f"Resumo gerado, mas houve um erro ao enviar para o Monday: {result}")
+        # Create tabs for message input and prompt editing
+        message_tab, prompt_tab = st.tabs(["💬 Mensagem", "⚙️ Configurar Prompt"])
+        
+        with message_tab:
+            if st.button("Gerar Sugestão de Resposta", use_container_width=True, key="generate_suggestion_button"):
+                with st.spinner("Gerando sugestão de resposta..."):
+                    if not messages_df.empty:
+                        suggestion = generate_suggestion(messages_df)
+                        if suggestion:
+                            st.session_state.suggested_message = suggestion
+                        else:
+                            st.error("Não foi possível gerar uma sugestão de resposta.")
                     else:
-                        st.error("Não foi possível gerar o resumo do lead.")
-                else:
-                    st.error("Não há mensagens disponíveis para gerar o resumo.")
-        
-        # Display lead summary if available
-        if st.session_state.lead_summary:
-            with summary_container.expander("Resumo do Lead", expanded=True):
-                st.markdown(st.session_state.lead_summary)
-        else:
-            with summary_container:
-                st.info("Clique no botão acima para gerar o resumo do lead.")
-    
-    with summary_prompt_tab:
-        st.markdown("### Configurar Prompt de Resumo")
-        st.markdown("Personalize o prompt usado para gerar resumos do lead.")
-        
-        # Initialize prompt in session state if not exists
-        if 'summary_prompt' not in st.session_state:
-            st.session_state.summary_prompt = """Você é um assistente especializado em análise de leads jurídicos. 
-Sua função é gerar resumos claros e objetivos do status do lead, focando em informações relevantes para o acompanhamento do caso."""
-        
-        # Add prompt editor
-        prompt = st.text_area(
-            "Prompt de Resumo",
-            value=st.session_state.summary_prompt,
-            height=200,
-            help="Este prompt será usado para gerar resumos do lead. Use {conversation_text} para incluir o histórico de conversas e {monday_text} para incluir os dados do Monday."
-        )
-        
-        # Add save button
-        if st.button("💾 Salvar Prompt", use_container_width=True, key="save_summary_prompt"):
-            st.session_state.summary_prompt = prompt
-            st.success("✅ Prompt salvo com sucesso!")
-        
-        # Add reset button
-        if st.button("🔄 Restaurar Padrão", use_container_width=True, key="reset_summary_prompt"):
-            st.session_state.summary_prompt = """Você é um assistente especializado em análise de leads jurídicos. 
-Sua função é gerar resumos claros e objetivos do status do lead, focando em informações relevantes para o acompanhamento do caso."""
-            st.success("✅ Prompt restaurado para o valor padrão!")
-
-    st.markdown("---")
-
-    # Display Monday.com updates
-    st.markdown("### Atualizações do Monday")
-    
-    try:
-        # Load Monday updates with spinner
-        with st.spinner('Carregando atualizações do Monday...'):
-            updates = fetch_monday_updates([str(lead_data['id'])])
+                        st.error("Não há mensagens disponíveis para gerar sugestão.")
             
-            if updates and len(updates) > 0 and updates[0] and 'updates' in updates[0]:
-                # Create expander for updates
-                with st.expander(f"Ver histórico de atualizações ({len(updates[0]['updates'])} atualizações)", expanded=False):
+            # Campo de mensagem e exibição dos resultados
+            message = st.text_area(
+                "Digite sua mensagem:", 
+                height=100,
+                value=st.session_state.get('suggested_message', '')
+            )
+            if 'suggested_message' in st.session_state:
+                del st.session_state.suggested_message
+            
+            # Botão de enviar mensagem
+            if st.button("📤 Enviar Mensagem", use_container_width=True, key="send_message_button"):
+                if not message:
+                    st.error("Por favor, digite uma mensagem para enviar.")
+                else:
+                    phone = lead_data.get('phone')
+                    if not phone:
+                        st.error("Número de telefone não disponível para este lead.")
+                    else:
+                        with st.spinner("Enviando mensagem..."):
+                            success, result = send_whatsapp_message(phone, message)
+                            if success:
+                                st.success(result)
+                                # Adicionar mensagem ao histórico
+                                messages_df = add_message_to_history(
+                                    messages_df,
+                                    "Atendente",
+                                    "+5511988094449",
+                                    "Cliente",
+                                    phone,
+                                    message
+                                )
+                            else:
+                                st.error(result)
+            
+            # Botão de enviar mensagem de teste
+            if st.button("🧪 Enviar Mensagem de Teste", use_container_width=True, key="send_test_message_button"):
+                if not message:
+                    st.error("Por favor, digite uma mensagem para enviar.")
+                else:
+                    test_phone = "31992251502"
+                    with st.spinner("Enviando mensagem de teste..."):
+                        success, result = send_whatsapp_message(test_phone, message, test_mode=True, test_phone=test_phone)
+                        if success:
+                            st.success(result)
+                        else:
+                            st.error(result)
+            
+            # Botão de atualizar dados do lead
+            if st.button("🔄 Atualizar Dados do Lead", use_container_width=True, key="refresh_lead"):
+                st.cache_data.clear()
+                for key in ['lead_summary', 'messages_df']:
+                    if key in st.session_state:
+                        del st.session_state[key]
+                st.rerun()
+
+        with prompt_tab:
+            st.markdown("### Configurar Prompt de Sugestão")
+            st.markdown("Personalize o prompt usado para gerar sugestões de resposta.")
+            if 'suggestion_prompt' not in st.session_state:
+                st.session_state.suggestion_prompt = """Você é um assistente especializado em sugestões de resposta para atendimento jurídico.
+Sua função é gerar sugestões de resposta profissionais e adequadas ao contexto.
+
+- Não adicione nenhum texto que não seria enviado para o cliente final.
+- Não assine as mensagens"""
+            prompt = st.text_area(
+                "Prompt de Sugestão",
+                value=st.session_state.suggestion_prompt,
+                height=200,
+                help="Este prompt será usado para gerar sugestões de resposta. Use {conversation_text} para incluir o histórico de conversas e {last_client_message} para incluir a última mensagem do cliente."
+            )
+            if st.button("💾 Salvar Prompt", use_container_width=True, key="save_suggestion_prompt_button"):
+                st.session_state.suggestion_prompt = prompt
+                prompts = {
+                    "summary_prompt": st.session_state.summary_prompt,
+                    "suggestion_prompt": st.session_state.suggestion_prompt,
+                    "documents_prompt": st.session_state.documents_prompt
+                }
+                if save_prompts(prompts):
+                    st.success("✅ Prompt salvo com sucesso!")
+                else:
+                    st.error("❌ Erro ao salvar prompt!")
+            if st.button("🔄 Restaurar Padrão", use_container_width=True, key="reset_suggestion_prompt_button"):
+                st.session_state.suggestion_prompt = """Você é um assistente especializado em sugestões de resposta para atendimento jurídico.
+Sua função é gerar sugestões de resposta profissionais e adequadas ao contexto.
+
+- Não adicione nenhum texto que não seria enviado para o cliente final.
+- Não assine as mensagens"""
+                prompts = {
+                    "summary_prompt": st.session_state.summary_prompt,
+                    "suggestion_prompt": st.session_state.suggestion_prompt,
+                    "documents_prompt": st.session_state.documents_prompt
+                }
+                if save_prompts(prompts):
+                    st.success("✅ Prompt restaurado para o valor padrão!")
+                else:
+                    st.error("❌ Erro ao salvar prompt!")
+
+        st.markdown("---")
+        
+        # Display message history after the message sending section
+        st.markdown("### Histórico de Mensagens")
+        if not messages_df.empty:
+            # Sort messages in descending order (newest first)
+            sorted_messages = messages_df.sort_values('created_at', ascending=False)
+            
+            # Calculate response times
+            response_times = calculate_response_time(sorted_messages)
+            
+            # Display messages
+            current_date = None
+            for idx, message in sorted_messages.iterrows():
+                # Check if date has changed
+                message_date = message['created_at'].strftime('%d/%m/%Y')
+                if current_date != message_date:
+                    current_date = message_date
+                    st.markdown(f"""
+                        <div style='
+                            text-align: center;
+                            margin: 1rem 0;
+                            padding: 0.5rem;
+                            background-color: #f0f2f6;
+                            border-radius: 0.5rem;
+                            color: #666;
+                            font-weight: 500;
+                        '>
+                            {current_date}
+                        </div>
+                    """, unsafe_allow_html=True)
+                
+                # Determine message role
+                role = "user" if message['message_direction'] == 'received' else "assistant"
+                
+                # Clean message content
+                content = strip_html_tags(message['message_text'] or '')
+                
+                # Display message
+                with st.chat_message(role):
+                    # Display timestamp
+                    timestamp = message['created_at'].strftime('%H:%M')
+                    st.caption(timestamp)
+                    
+                    # Check if message is an email using channel field
+                    is_email = 'channel' in message and message['channel'] == 'email'
+                    
+                    # Display main message with email indicator if applicable
+                    if is_email:
+                        st.markdown("""
+                            <div style='
+                                background-color: #e6f3ff;
+                                border-radius: 5px;
+                                padding: 10px;
+                                margin-bottom: 10px;
+                            '>
+                                <div style='font-size: 16px; margin-bottom: 5px;'>📧 <strong>Email</strong></div>
+                                <div style='font-size: 14px;'>{}</div>
+                            </div>
+                        """.format(content), unsafe_allow_html=True)
+                    else:
+                        st.write(content)
+                    
+                    # Display file information if present
+                    if 'file_url' in message and pd.notna(message['file_url']):
+                        st.markdown(f"[Abrir arquivo]({message['file_url']})")
+                    
+                    # Display attachment URL if present
+                    if 'attachment_url' in message and pd.notna(message['attachment_url']):
+                        st.markdown(f"[Abrir anexo]({message['attachment_url']})")
+                    
+                    # Display OCR information if present
+                    if 'ocr_scan' in message and pd.notna(message['ocr_scan']):
+                        st.markdown("""
+                            <div style='
+                                background-color: #f0f2f6;
+                                border-radius: 5px;
+                                padding: 10px;
+                                margin: 5px 0;
+                            '>
+                                <div style='font-size: 16px; margin-bottom: 5px;'>📄 <strong>OCR</strong></div>
+                                <div style='font-size: 14px;'>{}</div>
+                            </div>
+                        """.format(message['ocr_scan']), unsafe_allow_html=True)
+                    
+                    # Display attachment filename if present
+                    if 'attachment_filename' in message and pd.notna(message['attachment_filename']):
+                        st.markdown(f"**Anexo:** {message['attachment_filename']}")
+                    
+                    # Display audio transcription if present
+                    if 'audio_transcription' in message and pd.notna(message['audio_transcription']):
+                        st.markdown("""
+                            <div style='
+                                background-color: #f0f2f6;
+                                border-radius: 5px;
+                                padding: 10px;
+                                margin: 5px 0;
+                            '>
+                                <div style='font-size: 16px; margin-bottom: 5px;'>🎤 <strong>Transcrição de Áudio</strong></div>
+                                <div style='font-size: 14px;'>{}</div>
+                            </div>
+                        """.format(message['audio_transcription']), unsafe_allow_html=True)
+                    
+                    # Display response time if available
+                    if message['message_direction'] == 'received':
+                        if idx in response_times:
+                            response_time = format_response_time(response_times[idx])
+                            st.caption(f"Tempo de resposta: {response_time}")
+                        else:
+                            st.caption("Aguardando resposta")
+        else:
+            st.info("Nenhuma mensagem encontrada para este lead.")
+
+    # Tab 3: Documentos Faltantes
+    with tab3:
+        st.markdown("### Documentos Faltantes")
+        
+        # Create tabs for document list and prompt editing
+        documents_tab, documents_prompt_tab = st.tabs(["📄 Lista de Documentos", "⚙️ Configurar Prompt"])
+        
+        with documents_tab:
+            if st.button("Gerar Lista de Documentos Faltantes", use_container_width=True):
+                with st.spinner("Gerando lista de documentos..."):
+                    if not messages_df.empty:
+                        # Use prompt customizado se existir
+                        documents_prompt = st.session_state.get('documents_prompt', """Você é um assistente especializado em análise de documentos jurídicos.
+Sua função é identificar quais documentos foram enviados e quais ainda faltam.""")
+                        checklist = generate_missing_documents(messages_df, documents_prompt)
+                        if checklist:
+                            st.session_state.documents_checklist = checklist
+                        else:
+                            st.error("Não foi possível gerar a lista de documentos.")
+                    else:
+                        st.error("Não há mensagens disponíveis para gerar a lista de documentos.")
+            
+            if 'documents_checklist' in st.session_state:
+                st.markdown(st.session_state.documents_checklist)
+            else:
+                st.info("Clique no botão acima para gerar a lista de documentos faltantes.")
+        
+        with documents_prompt_tab:
+            st.markdown("### Configurar Prompt de Documentos")
+            st.markdown("Personalize o prompt usado para gerar a lista de documentos faltantes.")
+            if 'documents_prompt' not in st.session_state:
+                st.session_state.documents_prompt = """Você é um assistente especializado em análise de documentos jurídicos.
+Sua função é identificar quais documentos foram enviados e quais ainda faltam."""
+            documents_prompt = st.text_area(
+                "Prompt de Documentos",
+                value=st.session_state.documents_prompt,
+                height=200,
+                help="Este prompt será usado para gerar a lista de documentos faltantes. Use {conversation_text} para incluir o histórico de conversas."
+            )
+            if st.button("💾 Salvar Prompt de Documentos", use_container_width=True, key="save_documents_prompt_button"):
+                st.session_state.documents_prompt = documents_prompt
+                prompts = {
+                    "summary_prompt": st.session_state.summary_prompt,
+                    "suggestion_prompt": st.session_state.suggestion_prompt,
+                    "documents_prompt": st.session_state.documents_prompt
+                }
+                if save_prompts(prompts):
+                    st.success("✅ Prompt de documentos salvo com sucesso!")
+                else:
+                    st.error("❌ Erro ao salvar prompt!")
+            if st.button("🔄 Restaurar Prompt de Documentos", use_container_width=True, key="reset_documents_prompt_button"):
+                st.session_state.documents_prompt = """Você é um assistente especializado em análise de documentos jurídicos.
+Sua função é identificar quais documentos foram enviados e quais ainda faltam."""
+                prompts = {
+                    "summary_prompt": st.session_state.summary_prompt,
+                    "suggestion_prompt": st.session_state.suggestion_prompt,
+                    "documents_prompt": st.session_state.documents_prompt
+                }
+                if save_prompts(prompts):
+                    st.success("✅ Prompt de documentos restaurado para o valor padrão!")
+                else:
+                    st.error("❌ Erro ao salvar prompt!")
+
+    # Tab 4: Updates no Monday
+    with tab4:
+        try:
+            # Load Monday updates with spinner
+            with st.spinner('Carregando atualizações do Monday...'):
+                updates = fetch_monday_updates([str(lead_data['id'])])
+                
+                if updates and len(updates) > 0 and updates[0] and 'updates' in updates[0]:
                     # Display updates
                     for update in updates[0]['updates']:
                         created_at = datetime.fromisoformat(update['created_at'].replace('Z', '+00:00'))
@@ -591,51 +860,51 @@ Sua função é gerar resumos claros e objetivos do status do lead, focando em i
                         # Display update body
                         st.markdown(update['body'], unsafe_allow_html=True)
                         st.markdown("---")
-            else:
-                st.info("Nenhuma atualização encontrada para este lead.")
-    except Exception as e:
-        st.error(f"Erro ao carregar atualizações do Monday: {str(e)}")
+                else:
+                    st.info("Nenhuma atualização encontrada para este lead.")
+        except Exception as e:
+            st.error(f"Erro ao carregar atualizações do Monday: {str(e)}")
 
-    st.markdown("---")
+    # Tab 5: Chat com IA
+    with tab5:
+        # Initialize chat history in session state if not exists
+        if 'chat_history' not in st.session_state:
+            st.session_state.chat_history = []
 
-    # Add Chat with AI section
-    st.markdown("### 💬 Chat com IA")
-    st.markdown("Faça perguntas sobre o lead e receba respostas da IA.")
+        # Create a container for the chat
+        chat_container = st.container()
 
-    # Initialize chat history in session state if not exists
-    if 'chat_history' not in st.session_state:
-        st.session_state.chat_history = []
+        with chat_container:
+            # Display chat history
+            for message in st.session_state.chat_history:
+                with st.chat_message(message["role"]):
+                    st.markdown(message["content"])
 
-    # Display chat history
-    for message in st.session_state.chat_history:
-        with st.chat_message(message["role"]):
-            st.markdown(message["content"])
-
-    # Chat input
-    if prompt := st.chat_input("Digite sua pergunta sobre o lead..."):
-        # Add user message to chat history
-        st.session_state.chat_history.append({"role": "user", "content": prompt})
-        
-        # Display user message
-        with st.chat_message("user"):
-            st.markdown(prompt)
-        
-        # Prepare context for the AI
-        conversation_text = "\n".join([f"{msg['role']}: {msg['content']}" for msg in st.session_state.chat_history])
-        
-        # Prepare Monday info
-        monday_info = {
-            'item_id': str(lead_data['id']),
-            'name': lead_data.get('title', 'N/A'),
-            'title': lead_data.get('title', 'N/A'),
-            'status': lead_data.get('status', 'N/A'),
-            'prioridade': lead_data.get('prioridade', 'N/A'),
-            'origem': lead_data.get('origem', 'N/A'),
-            'email': lead_data.get('email', 'N/A')
-        }
-        
-        # Prepare the prompt for the AI
-        full_prompt = f"""Analise o histórico de conversas e os dados do lead para responder à pergunta do usuário.
+            # Chat input
+            if prompt := st.chat_input("Digite sua pergunta sobre o lead..."):
+                # Add user message to chat history
+                st.session_state.chat_history.append({"role": "user", "content": prompt})
+                
+                # Display user message
+                with st.chat_message("user"):
+                    st.markdown(prompt)
+                
+                # Prepare context for the AI
+                conversation_text = "\n".join([f"{msg['role']}: {msg['content']}" for msg in st.session_state.chat_history])
+                
+                # Prepare Monday info
+                monday_info = {
+                    'item_id': str(lead_data['id']),
+                    'name': lead_data.get('title', 'N/A'),
+                    'title': lead_data.get('title', 'N/A'),
+                    'status': lead_data.get('status', 'N/A'),
+                    'prioridade': lead_data.get('prioridade', 'N/A'),
+                    'origem': lead_data.get('origem', 'N/A'),
+                    'email': lead_data.get('email', 'N/A')
+                }
+                
+                # Prepare the prompt for the AI
+                full_prompt = f"""Analise o histórico de conversas e os dados do lead para responder à pergunta do usuário.
 
 Histórico de Conversas:
 {conversation_text}
@@ -651,324 +920,49 @@ Dados do Monday:
 Pergunta do usuário: {prompt}
 
 Por favor, forneça uma resposta clara e objetiva baseada nas informações disponíveis."""
-        
-        # Call Grok API
-        url = "https://api.x.ai/v1/chat/completions"
-        headers = {
-            "Authorization": f"Bearer {st.secrets.grok.api_key}",
-            "Content-Type": "application/json"
-        }
-        
-        data = {
-            "model": "grok-3-latest",
-            "messages": [
-                {"role": "system", "content": """Você é um assistente especializado em análise de leads jurídicos.
+                
+                # Call Grok API
+                url = "https://api.x.ai/v1/chat/completions"
+                headers = {
+                    "Authorization": f"Bearer {st.secrets.grok.api_key}",
+                    "Content-Type": "application/json"
+                }
+                
+                data = {
+                    "model": "grok-3-latest",
+                    "messages": [
+                        {"role": "system", "content": """Você é um assistente especializado em análise de leads jurídicos.
 Sua função é ajudar a entender melhor o contexto do lead e fornecer insights relevantes.
 Seja claro, objetivo e profissional em suas respostas."""},
-                {"role": "user", "content": full_prompt}
-            ],
-            "temperature": 0.7,
-            "stream": False
-        }
-        
-        try:
-            with st.spinner("Pensando..."):
-                with httpx.Client(verify=True, timeout=60.0) as client:
-                    response = client.post(url, headers=headers, json=data)
-                    response.raise_for_status()
-                    result = response.json()
-                    ai_response = result['choices'][0]['message']['content']
-                    
-                    # Add AI response to chat history
-                    st.session_state.chat_history.append({"role": "assistant", "content": ai_response})
-                    
-                    # Display AI response
-                    with st.chat_message("assistant"):
-                        st.markdown(ai_response)
-        except Exception as e:
-            st.error(f"Erro ao gerar resposta: {str(e)}")
+                        {"role": "user", "content": full_prompt}
+                    ],
+                    "temperature": 0.7,
+                    "stream": False
+                }
+                
+                try:
+                    with st.spinner("Pensando..."):
+                        with httpx.Client(verify=True, timeout=60.0) as client:
+                            response = client.post(url, headers=headers, json=data)
+                            response.raise_for_status()
+                            result = response.json()
+                            ai_response = result['choices'][0]['message']['content']
+                            
+                            # Add AI response to chat history
+                            st.session_state.chat_history.append({"role": "assistant", "content": ai_response})
+                            
+                            # Display AI response
+                            with st.chat_message("assistant"):
+                                st.markdown(ai_response)
+                except Exception as e:
+                    st.error(f"Erro ao gerar resposta: {str(e)}")
 
-    # Add clear chat button
-    if st.button("🗑️ Limpar Chat", use_container_width=True, key="clear_chat_button"):
-        st.session_state.chat_history = []
-        st.rerun()
+            # Add clear chat button
+            if st.button("🗑️ Limpar Chat", use_container_width=True, key="clear_chat_button"):
+                st.session_state.chat_history = []
+                st.rerun()
 
     st.markdown("---")
-
-    # Add WhatsApp message section
-    st.markdown("### Enviar Mensagem")
-    
-    # Create tabs for message input and prompt editing
-    message_tab, prompt_tab, document_prompt_tab = st.tabs(["💬 Mensagem", "⚙️ Configurar Prompt", "📄 Configurar Prompt de Documentos"])
-    
-    with message_tab:
-        col1, col2 = st.columns(2)
-        with col1:
-            if st.button("Gerar Sugestão de Resposta", use_container_width=True, key="generate_suggestion_button"):
-                with st.spinner("Gerando sugestão de resposta..."):
-                    if not messages_df.empty:
-                        suggestion = generate_suggestion(messages_df)
-                        if suggestion:
-                            st.session_state.suggested_message = suggestion
-                        else:
-                            st.error("Não foi possível gerar uma sugestão de resposta.")
-                    else:
-                        st.error("Não há mensagens disponíveis para gerar sugestão.")
-        with col2:
-            if st.button("Gerar Lista de Documentos Faltantes", use_container_width=True, key="generate_documents_button"):
-                with st.spinner("Gerando lista de documentos..."):
-                    if not messages_df.empty:
-                        # Use prompt customizado se existir
-                        documents_prompt = st.session_state.get('documents_prompt', """Você é um assistente especializado em análise de documentos jurídicos.
-Sua função é identificar quais documentos foram enviados e quais ainda faltam.""")
-                        checklist = generate_missing_documents(messages_df, documents_prompt)
-                        if checklist:
-                            st.session_state.documents_checklist = checklist
-                        else:
-                            st.error("Não foi possível gerar a lista de documentos.")
-                    else:
-                        st.error("Não há mensagens disponíveis para gerar a lista de documentos.")
-        # Campo de mensagem e exibição dos resultados
-        message = st.text_area(
-            "Digite sua mensagem:", 
-            height=100,
-            value=st.session_state.get('suggested_message', '')
-        )
-        if 'suggested_message' in st.session_state:
-            del st.session_state.suggested_message
-        if 'documents_checklist' in st.session_state:
-            st.markdown("### Documentos Faltantes:")
-            st.markdown(st.session_state.documents_checklist)
-        
-        # Botão de enviar mensagem
-        if st.button("📤 Enviar Mensagem", use_container_width=True, key="send_message_button"):
-            if not message:
-                st.error("Por favor, digite uma mensagem para enviar.")
-            else:
-                phone = lead_data.get('phone')
-                if not phone:
-                    st.error("Número de telefone não disponível para este lead.")
-                else:
-                    with st.spinner("Enviando mensagem..."):
-                        success, result = send_whatsapp_message(phone, message)
-                        if success:
-                            st.success(result)
-                            # Adicionar mensagem ao histórico
-                            messages_df = add_message_to_history(
-                                messages_df,
-                                "Atendente",
-                                "+5511988094449",
-                                "Cliente",
-                                phone,
-                                message
-                            )
-                        else:
-                            st.error(result)
-        
-        # Botão de enviar mensagem de teste
-        if st.button("🧪 Enviar Mensagem de Teste", use_container_width=True, key="send_test_message_button"):
-            if not message:
-                st.error("Por favor, digite uma mensagem para enviar.")
-            else:
-                test_phone = "31992251502"
-                with st.spinner("Enviando mensagem de teste..."):
-                    success, result = send_whatsapp_message(test_phone, message, test_mode=True, test_phone=test_phone)
-                    if success:
-                        st.success(result)
-                    else:
-                        st.error(result)
-
-    with prompt_tab:
-        st.markdown("### Configurar Prompt de Sugestão")
-        st.markdown("Personalize o prompt usado para gerar sugestões de resposta.")
-        if 'suggestion_prompt' not in st.session_state:
-            st.session_state.suggestion_prompt = """Você é um assistente especializado em sugestões de resposta para atendimento jurídico.
-Sua função é gerar sugestões de resposta profissionais e adequadas ao contexto.
-
-- Não adicione nenhum texto que não seria enviado para o cliente final.
-- Não assine as mensagens"""
-        prompt = st.text_area(
-            "Prompt de Sugestão",
-            value=st.session_state.suggestion_prompt,
-            height=200,
-            help="Este prompt será usado para gerar sugestões de resposta. Use {conversation_text} para incluir o histórico de conversas e {last_client_message} para incluir a última mensagem do cliente."
-        )
-        if st.button("💾 Salvar Prompt", use_container_width=True, key="save_suggestion_prompt_button"):
-            st.session_state.suggestion_prompt = prompt
-            prompts = {
-                "summary_prompt": st.session_state.summary_prompt,
-                "suggestion_prompt": st.session_state.suggestion_prompt,
-                "documents_prompt": st.session_state.documents_prompt
-            }
-            if save_prompts(prompts):
-                st.success("✅ Prompt salvo com sucesso!")
-            else:
-                st.error("❌ Erro ao salvar prompt!")
-        if st.button("🔄 Restaurar Padrão", use_container_width=True, key="reset_suggestion_prompt_button"):
-            st.session_state.suggestion_prompt = """Você é um assistente especializado em sugestões de resposta para atendimento jurídico.
-Sua função é gerar sugestões de resposta profissionais e adequadas ao contexto.
-
-- Não adicione nenhum texto que não seria enviado para o cliente final.
-- Não assine as mensagens"""
-            prompts = {
-                "summary_prompt": st.session_state.summary_prompt,
-                "suggestion_prompt": st.session_state.suggestion_prompt,
-                "documents_prompt": st.session_state.documents_prompt
-            }
-            if save_prompts(prompts):
-                st.success("✅ Prompt restaurado para o valor padrão!")
-            else:
-                st.error("❌ Erro ao salvar prompt!")
-
-    with document_prompt_tab:
-        st.markdown("### Configurar Prompt de Documentos")
-        st.markdown("Personalize o prompt usado para gerar a lista de documentos faltantes.")
-        if 'documents_prompt' not in st.session_state:
-            st.session_state.documents_prompt = """Você é um assistente especializado em análise de documentos jurídicos.
-Sua função é identificar quais documentos foram enviados e quais ainda faltam."""
-        documents_prompt = st.text_area(
-            "Prompt de Documentos",
-            value=st.session_state.documents_prompt,
-            height=200,
-            help="Este prompt será usado para gerar a lista de documentos faltantes. Use {conversation_text} para incluir o histórico de conversas."
-        )
-        if st.button("💾 Salvar Prompt de Documentos", use_container_width=True, key="save_documents_prompt_button"):
-            st.session_state.documents_prompt = documents_prompt
-            prompts = {
-                "summary_prompt": st.session_state.summary_prompt,
-                "suggestion_prompt": st.session_state.suggestion_prompt,
-                "documents_prompt": st.session_state.documents_prompt
-            }
-            if save_prompts(prompts):
-                st.success("✅ Prompt de documentos salvo com sucesso!")
-            else:
-                st.error("❌ Erro ao salvar prompt!")
-        if st.button("🔄 Restaurar Prompt de Documentos", use_container_width=True, key="reset_documents_prompt_button"):
-            st.session_state.documents_prompt = """Você é um assistente especializado em análise de documentos jurídicos.
-Sua função é identificar quais documentos foram enviados e quais ainda faltam."""
-            prompts = {
-                "summary_prompt": st.session_state.summary_prompt,
-                "suggestion_prompt": st.session_state.suggestion_prompt,
-                "documents_prompt": st.session_state.documents_prompt
-            }
-            if save_prompts(prompts):
-                st.success("✅ Prompt de documentos restaurado para o valor padrão!")
-            else:
-                st.error("❌ Erro ao salvar prompt!")
-
-    st.markdown("---")
-
-    # Display WhatsApp messages
-    st.markdown("### Histórico de Mensagens")
-    
-    if not messages_df.empty:
-        # Sort messages in descending order (newest first)
-        sorted_messages = messages_df.sort_values('created_at', ascending=False)
-        
-        # Calculate response times
-        response_times = calculate_response_time(sorted_messages)
-        
-        # Display messages
-        current_date = None
-        for idx, message in sorted_messages.iterrows():
-            # Check if date has changed
-            message_date = message['created_at'].strftime('%d/%m/%Y')
-            if current_date != message_date:
-                current_date = message_date
-                st.markdown(f"""
-                    <div style='
-                        text-align: center;
-                        margin: 1rem 0;
-                        padding: 0.5rem;
-                        background-color: #f0f2f6;
-                        border-radius: 0.5rem;
-                        color: #666;
-                        font-weight: 500;
-                    '>
-                        {current_date}
-                    </div>
-                """, unsafe_allow_html=True)
-            
-            # Determine message role
-            role = "user" if message['message_direction'] == 'received' else "assistant"
-            
-            # Clean message content
-            content = strip_html_tags(message['message_text'] or '')
-            
-            # Display message
-            with st.chat_message(role):
-                # Display timestamp
-                timestamp = message['created_at'].strftime('%H:%M')
-                st.caption(timestamp)
-                
-                # Check if message is an email using channel field
-                is_email = 'channel' in message and message['channel'] == 'email'
-                
-                # Display main message with email indicator if applicable
-                if is_email:
-                    st.markdown("""
-                        <div style='
-                            background-color: #e6f3ff;
-                            border-radius: 5px;
-                            padding: 10px;
-                            margin-bottom: 10px;
-                        '>
-                            <div style='font-size: 16px; margin-bottom: 5px;'>📧 <strong>Email</strong></div>
-                            <div style='font-size: 14px;'>{}</div>
-                        </div>
-                    """.format(content), unsafe_allow_html=True)
-                else:
-                    st.write(content)
-                
-                # Display file information if present
-                if 'file_url' in message and pd.notna(message['file_url']):
-                    st.markdown(f"[Abrir arquivo]({message['file_url']})")
-                
-                # Display attachment URL if present
-                if 'attachment_url' in message and pd.notna(message['attachment_url']):
-                    st.markdown(f"[Abrir anexo]({message['attachment_url']})")
-                
-                # Display OCR information if present
-                if 'ocr_scan' in message and pd.notna(message['ocr_scan']):
-                    st.markdown("""
-                        <div style='
-                            background-color: #f0f2f6;
-                            border-radius: 5px;
-                            padding: 10px;
-                            margin: 5px 0;
-                        '>
-                            <div style='font-size: 16px; margin-bottom: 5px;'>📄 <strong>OCR</strong></div>
-                            <div style='font-size: 14px;'>{}</div>
-                        </div>
-                    """.format(message['ocr_scan']), unsafe_allow_html=True)
-                
-                # Display attachment filename if present
-                if 'attachment_filename' in message and pd.notna(message['attachment_filename']):
-                    st.markdown(f"**Anexo:** {message['attachment_filename']}")
-                
-                # Display audio transcription if present
-                if 'audio_transcription' in message and pd.notna(message['audio_transcription']):
-                    st.markdown("""
-                        <div style='
-                            background-color: #f0f2f6;
-                            border-radius: 5px;
-                            padding: 10px;
-                            margin: 5px 0;
-                        '>
-                            <div style='font-size: 16px; margin-bottom: 5px;'>🎤 <strong>Transcrição de Áudio</strong></div>
-                            <div style='font-size: 14px;'>{}</div>
-                        </div>
-                    """.format(message['audio_transcription']), unsafe_allow_html=True)
-                
-                # Display response time if available
-                if message['message_direction'] == 'received':
-                    if idx in response_times:
-                        response_time = format_response_time(response_times[idx])
-                        st.caption(f"Tempo de resposta: {response_time}")
-                    else:
-                        st.caption("Aguardando resposta")
-    else:
-        st.info("Nenhuma mensagem encontrada para este lead.")
 
 def send_whatsapp_message(phone, message, test_mode=False, test_phone=None):
     """Envia mensagem via WhatsApp usando a API do Timelines."""
